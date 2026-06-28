@@ -170,7 +170,10 @@ async function onAnalyze() {
   }
 }
 
+let addInFlight = false;
 async function doAdd(hf, force) {
+  if (addInFlight) return;        // guard against double-submit (one launch per click)
+  addInFlight = true;
   const errEl = $("#add-error"); errEl.hidden = true;
   const adv = readAdvanced();
   const btn = $("#run-btn"); btn.classList.add("is-busy");
@@ -193,6 +196,7 @@ async function doAdd(hf, force) {
       errEl.textContent = err.message;
     }
   } finally {
+    addInFlight = false;
     btn.classList.remove("is-busy");
   }
 }

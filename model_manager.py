@@ -25,6 +25,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -664,6 +665,8 @@ class Manager:
         self.docker = DockerEngine()
         self.native = NativeEngine()
         self.engine = self._select_engine()
+        self._add_lock = threading.Lock()  # serialize add() so concurrent
+        # duplicate submits can't both create an entry (the "-2" duplicate bug)
 
     # ---- engine selection -------------------------------------------------
     def _select_engine(self) -> Engine:
@@ -829,13 +832,6 @@ class Manager:
             err.analysis = report  # type: ignore[attr-defined]
             raise err
 
-        served = slugify(served_name) if served_name else slugify(hf_id.split("/")[-1])
-        served = self._unique_served(served)
-        if port is None:
-            port = self.next_free_port()
-        elif any(e.port == port for e in self.entries.values()):
-            raise ValueError(f"port {port} is already assigned to another model")
-
         merged = dict(PARAM_DEFAULTS)
         merged.update(params or {})
 
@@ -861,12 +857,31 @@ class Manager:
             merged.setdefault("mm_processor_kwargs", None)
         _validate_params(merged)
 
-        e = ModelEntry(id=served, hf_id=hf_id, served_name=served, port=port,
-                       source="custom", params=merged, desired_state="stopped",
-                       multimodal=multimodal, size_gb=report.get("size_gb") or 0.0,
-                       created_at=_now())
-        self.entries[e.id] = e
-        self.save()
+        # Critical section: reject a duplicate of an already-active model and
+        # allocate name/port atomically, so two near-simultaneous submits (a
+        # double-clicked button, two tabs) can't both create an entry.
+        with self._add_lock:
+            dup = next((x for x in self.entries.values()
+                        if x.hf_id == hf_id and x.desired_state != "stopped"), None)
+            if dup is not None:
+                raise ValueError(
+                    f"{hf_id} is already running as '{dup.served_name}' on port "
+                    f"{dup.port}. Stop it first to launch another copy.")
+            served = slugify(served_name) if served_name else slugify(hf_id.split("/")[-1])
+            served = self._unique_served(served)
+            if port is None:
+                port = self.next_free_port()
+            elif any(x.port == port for x in self.entries.values()):
+                raise ValueError(f"port {port} is already assigned to another model")
+            # Mark running up-front (when launching) so a concurrent submit sees
+            # it as active and is rejected by the dup check above.
+            e = ModelEntry(id=served, hf_id=hf_id, served_name=served, port=port,
+                           source="custom", params=merged,
+                           desired_state="running" if run else "stopped",
+                           multimodal=multimodal, size_gb=report.get("size_gb") or 0.0,
+                           created_at=_now())
+            self.entries[e.id] = e
+            self.save()
         if run:
             self.start(e.id)
         return e
