@@ -92,6 +92,26 @@ async def analyze(req: AnalyzeRequest, _=Depends(_require_auth)):
     return await asyncio.to_thread(mm.analyze_model, req.hf_id)
 
 
+@app.get("/api/cache")
+async def cache(_=Depends(_require_auth)):
+    """Already-downloaded LLMs in the HF cache — runnable without re-downloading."""
+    models = await asyncio.to_thread(mm.list_cached_models)
+    return {"models": models, "hf_home": mm.hf_home(),
+            "total_gb": round(sum(m["size_gb"] for m in models), 1)}
+
+
+class CacheDeleteRequest(BaseModel):
+    hf_id: str
+
+
+@app.post("/api/cache/delete")
+async def cache_delete(req: CacheDeleteRequest, _=Depends(_require_auth)):
+    removed = await asyncio.to_thread(mm.delete_cached_model, req.hf_id)
+    if not removed:
+        raise HTTPException(404, "not found in cache")
+    return {"ok": True}
+
+
 @app.get("/api/test-image")
 async def test_image(_=Depends(_require_auth)):
     if not TEST_IMAGE.exists():

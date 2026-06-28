@@ -213,7 +213,7 @@ function renderCard(m) {
   let st = cards.get(m.id);
   if (!st) {
     const node = $("#model-card-tpl").content.firstElementChild.cloneNode(true);
-    st = { node, es: null, file: null };
+    st = { node, es: null, file: null, expanded: false };
     cards.set(m.id, st);
     wireCard(st, m);
     $("#models-list").appendChild(node);
@@ -246,11 +246,23 @@ function renderCard(m) {
   const errEl = $(".model-error", n);
   if (m.status === "error" && (m.error || m.detail)) {
     errEl.hidden = false; errEl.textContent = m.error || m.detail;
-    $(".model-body", n).hidden = false;
+    if (st.lastStatus !== "error") setExpanded(st, true);  // auto-open on a new error
   } else {
     errEl.hidden = true;
   }
+  $(".model-body", n).hidden = !st.expanded;
+  n.classList.toggle("expanded", !!st.expanded);
+  st.lastStatus = m.status;
   st.model = m;
+}
+
+// Expand/collapse a card's body (logs + register + test). Collapsing also stops
+// the log stream so we don't keep an SSE open for a hidden card.
+function setExpanded(st, val) {
+  st.expanded = val;
+  $(".model-body", st.node).hidden = !val;
+  st.node.classList.toggle("expanded", val);
+  if (!val) { $(".logs-block", st.node).hidden = true; closeLogs(st); }
 }
 
 function wireCard(st, m) {
@@ -268,10 +280,15 @@ function wireCard(st, m) {
     cards.delete(id); n.remove(); toast("Removed " + id, "ok");
   });
 
+  // Click the card header (anywhere but a button) toggles the whole body.
+  $(".model-card-top", n).addEventListener("click", (e) => {
+    if (e.target.closest("button")) return;
+    setExpanded(st, !st.expanded);
+  });
+
   $(".act-logs", n).addEventListener("click", () => {
-    body.hidden = false;
     const lb = $(".logs-block", n);
-    if (lb.hidden) { lb.hidden = false; openLogs(st, id); }
+    if (lb.hidden) { setExpanded(st, true); lb.hidden = false; openLogs(st, id); }
     else { lb.hidden = true; closeLogs(st); }
   });
 
@@ -358,6 +375,43 @@ function closeLogs(st) {
   if (st.es) { st.es.close(); st.es = null; }
 }
 
+// --------------------------------------------------------------------- cache library
+async function loadCache() {
+  let data;
+  try { data = await api("/api/cache"); }
+  catch (e) { return; }
+  const models = data.models || [];
+  const list = $("#cache-list");
+  list.innerHTML = "";
+  $("#cache-count").textContent = models.length
+    ? `· ${models.length} on disk (${data.total_gb} GB)` : "";
+  $("#cache-empty").hidden = models.length > 0;
+  for (const m of models) {
+    const li = document.createElement("li");
+    li.className = "cache-row";
+    li.innerHTML =
+      `<span class="c-id">${escapeHtml(m.hf_id)}` +
+      (m.multimodal ? `<span class="type-pill">vision</span>` : "") + `</span>` +
+      `<span class="c-size">${m.size_gb} GB</span>` +
+      `<span class="c-actions">` +
+      `<button class="btn btn-small btn-primary c-run">Run</button>` +
+      `<button class="btn btn-small btn-danger c-free">Free</button></span>`;
+    $(".c-run", li).addEventListener("click", () => {
+      toast("Launching " + m.hf_id + " from cache…", "ok");
+      doAdd(m.hf_id, false);
+    });
+    $(".c-free", li).addEventListener("click", async () => {
+      if (!confirm(`Delete ${m.hf_id} weights from disk (${m.size_gb} GB)? Re-running it later will re-download.`)) return;
+      try { await api("/api/cache/delete", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hf_id: m.hf_id }) });
+        toast("Freed " + m.hf_id, "ok"); loadCache();
+      } catch (e) { toast(e.message, "error"); }
+    });
+    list.appendChild(li);
+  }
+}
+
 // --------------------------------------------------------------------- list + poll
 async function loadModels() {
   let data;
@@ -379,8 +433,10 @@ function init() {
   $("#add-form").addEventListener("submit", onAdd);
   $("#analyze-btn").addEventListener("click", onAnalyze);
   $("#refresh-btn").addEventListener("click", () => { loadBanner(); loadModels(); });
+  $("#cache-refresh").addEventListener("click", loadCache);
   loadBanner();
   loadModels();
+  loadCache();
   // periodic refresh keeps status pills fresh for collapsed cards
   refreshTimer = setInterval(loadModels, 5000);
   setInterval(loadBanner, 15000);

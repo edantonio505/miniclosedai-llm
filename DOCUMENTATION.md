@@ -481,6 +481,7 @@ the test image's blue background).
 | Launch hangs / *No such container* on first run | First-time multi-GB image pull. The Docker engine now pulls in a streamed background step — watch **Logs**; the manager surfaces the real result, not a timeout. |
 | *Free memory … less than desired GPU memory utilization* | `gpu_memory_util` × total > free. The manager sizes adaptively from free memory; if you set it manually, lower it. |
 | `unrecognized arguments: --guided-decoding-backend …` | Flag removed in this vLLM version. Keep `guided_decoding_backend: null` (default), or pin an older `VLLM_IMAGE`. |
+| `max_model_len … VLLM_ALLOW_LONG_MAX_MODEL_LEN` | Requested `max_model_len` exceeds the model's context window. The GUI caps it to the model's `max_position_embeddings` automatically; in `models.yaml`, lower `max_model_len`. |
 | `401/403` / `GatedRepoError` in logs | Gated model — set `HF_TOKEN` and accept the license on HuggingFace. Analyze flags gating up front. |
 | Quick test returns the **same answer** to every prompt | Fixed: the test endpoint reads `prompt` as a multipart form field (`Form`). If you forked it, ensure `prompt`/`max_tokens` use `Form(...)`, not bare params. |
 | *model architecture not supported* | vLLM version too old for that model — pin a newer `VLLM_IMAGE` or use the shim. |

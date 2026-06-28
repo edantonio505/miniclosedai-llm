@@ -120,6 +120,87 @@ def unified_memory() -> dict:
     return {"total_gb": total, "available_gb": avail}
 
 
+def _dir_size_gb(path: Path) -> float:
+    """Sum on-disk size of a HF cache repo. Snapshot entries are symlinks into
+    blobs/, so counting only non-symlink files avoids double-counting."""
+    total = 0
+    for p in path.rglob("*"):
+        try:
+            st = p.lstat()
+        except OSError:
+            continue
+        # regular files only (skip the snapshot symlinks, which point into blobs/)
+        if not p.is_symlink() and st.st_mode & 0o170000 == 0o100000:
+            total += st.st_size
+    return round(total / 1e9, 1)
+
+
+def list_cached_models() -> list[dict]:
+    """Enumerate already-downloaded HuggingFace repos that are runnable LLMs.
+
+    Reads each repo's LOCAL config.json (no network) and keeps only generative
+    text/vision LLMs (skips tokenizers, embeddings, ASR/TTS, classifiers, etc.).
+    These can be run directly — the weights are already on disk, so launching
+    one loads from cache instead of downloading.
+    """
+    hub = Path(hf_home()) / "hub"
+    out: list[dict] = []
+    if not hub.is_dir():
+        return out
+    for d in sorted(hub.glob("models--*")):
+        hf_id = d.name[len("models--"):].replace("--", "/")
+        cfgs = list(d.glob("snapshots/*/config.json"))
+        if not cfgs:
+            continue
+        try:
+            cfg = json.loads(cfgs[0].read_text())
+        except (OSError, ValueError):
+            continue
+        archs = cfg.get("architectures") or []
+        # vision = a real vision tower (not just a nested text_config, which many
+        # text MoE/LLMs also have). runnable = a causal-LM or a vision LM; this
+        # excludes ASR/TTS (Whisper/CSM are ForConditionalGeneration but not chat).
+        multimodal = "vision_config" in cfg
+        is_causal = any("ForCausalLM" in a for a in archs)
+        if not (multimodal or is_causal):
+            continue
+        out.append({
+            "hf_id": hf_id,
+            "size_gb": _dir_size_gb(d),
+            "multimodal": bool(multimodal),
+            "arch": (cfg.get("architectures") or [None])[0],
+        })
+    return out
+
+
+def is_cached(hf_id: str) -> bool:
+    """True if the model's weight files are already present in the HF cache —
+    i.e. a launch will load from disk, not re-download."""
+    try:
+        hf_id = normalize_hf_id(hf_id)
+    except ValueError:
+        return False
+    snaps = Path(hf_home()) / "hub" / ("models--" + hf_id.replace("/", "--")) / "snapshots"
+    if not snaps.is_dir():
+        return False
+    for snap in snaps.iterdir():
+        for ext in ("*.safetensors", "*.bin", "*.gguf", "*.pt"):
+            if any(snap.glob(ext)):
+                return True
+    return False
+
+
+def delete_cached_model(hf_id: str) -> bool:
+    """Delete a model's weights from the HF cache to free disk. Returns True if removed."""
+    import shutil as _sh
+    hf_id = normalize_hf_id(hf_id)
+    d = Path(hf_home()) / "hub" / ("models--" + hf_id.replace("/", "--"))
+    if d.is_dir():
+        _sh.rmtree(d, ignore_errors=True)
+        return True
+    return False
+
+
 def _hf_get(url: str, timeout: float = 12.0):
     """GET a HuggingFace API/JSON URL with optional HF_TOKEN; None on failure."""
     headers = {"User-Agent": "miniclosedai-llm"}
@@ -204,6 +285,13 @@ def analyze_model(hf_id: str) -> dict:
                   or any(t in _VL_TAGS for t in tags)
                   or "vision_config" in cfg)
 
+    # Model's native context window — used to cap max_model_len so we never ask
+    # vLLM for more than the model supports (which aborts startup). VLMs often
+    # nest the text config under text_config.
+    tcfg = cfg.get("text_config") if isinstance(cfg.get("text_config"), dict) else cfg
+    max_ctx = (tcfg.get("max_position_embeddings") or cfg.get("max_position_embeddings")
+               or cfg.get("max_model_len") or cfg.get("n_positions"))
+
     # is it even a text/generative LLM vLLM can serve? (warn on obvious non-LLMs)
     text_gen = pipeline in ("", "text-generation", "text2text-generation",
                             "conversational") or multimodal
@@ -215,7 +303,7 @@ def analyze_model(hf_id: str) -> dict:
         "exists": True, "hf_id": hf_id,
         "pipeline_tag": pipeline, "multimodal": multimodal,
         "is_llm": text_gen, "gated": gated, "hf_token_present": token_present,
-        "params": params, "dtype": dtype,
+        "params": params, "dtype": dtype, "max_ctx": max_ctx,
         "size_gb": round(size_gb, 1) if size_gb else None,
         "need_gb": need_gb, "available_gb": mem["available_gb"],
         "total_gb": mem["total_gb"], "fits": fits,
@@ -682,6 +770,10 @@ class Manager:
         self.load()
         self._seed_presets()
         # Re-attach: anything the active engine reports running is marked running.
+        # Any entry previously marked running but NOT live (container/process gone,
+        # or its launch died with a prior manager) is reset to stopped — otherwise
+        # it would be stuck showing "pulling"/"loading" forever. We don't
+        # auto-relaunch; the user clicks Run again.
         live = {d["served"]: d for d in self.engine.discover()}
         for e in self.entries.values():
             if e.served_name in live:
@@ -690,6 +782,8 @@ class Manager:
                 lp = live[e.served_name].get("port")
                 if lp:
                     e.port = lp
+            elif e.desired_state == "running":
+                e.desired_state = "stopped"
         # Live instances with no registry entry → synthesize a card so the user
         # can see/stop them (e.g. registry file was deleted).
         for served, d in live.items():
@@ -744,6 +838,11 @@ class Manager:
 
         merged = dict(PARAM_DEFAULTS)
         merged.update(params or {})
+
+        # Cap max_model_len to the model's native context — asking vLLM for more
+        # than the model supports aborts startup (e.g. SmolLM2 is 8192, not 16384).
+        if not (params or {}).get("max_model_len") and report.get("max_ctx"):
+            merged["max_model_len"] = min(int(merged["max_model_len"]), int(report["max_ctx"]))
 
         # Size gpu_memory_util from FREE memory, not total. On unified-memory
         # parts (GB10) the OS/desktop already holds a chunk, so a fraction of
@@ -842,7 +941,11 @@ class Manager:
             if self._scan_error(logs):
                 return {"status": "error", "ready": False, "detail": eng.recent_logs(e, 40)}
             low = logs.lower()
-            if any(k in low for k in ("downloading", "fetching", "%|", "resolving data")):
+            # If the weights are already cached, this phase is load/compile, NOT a
+            # download — never mislabel it "downloading" (vLLM's weight-loading
+            # progress bar also prints "%|", which would otherwise fool us).
+            if not is_cached(e.hf_id) and any(
+                    k in low for k in ("downloading", "fetching", "resolving data")):
                 status = "downloading"
             else:
                 status = "loading"

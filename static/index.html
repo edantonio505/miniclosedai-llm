@@ -76,6 +76,18 @@
       </form>
     </section>
 
+    <!-- ============= downloaded (cached) models ============= -->
+    <section class="card">
+      <div class="models-head">
+        <h2>Downloaded models <span id="cache-count" class="hint"></span></h2>
+        <button id="cache-refresh" type="button" class="btn btn-small">Refresh</button>
+      </div>
+      <p class="hint">Already on disk in the HuggingFace cache — <strong>Run</strong> loads them
+        directly, no re-download.</p>
+      <ul id="cache-list" class="cache-list"></ul>
+      <p id="cache-empty" class="hint" hidden>No cached LLMs found yet.</p>
+    </section>
+
     <!-- ============= models ============= -->
     <section class="card">
       <div class="models-head">
@@ -93,6 +105,7 @@
   <template id="model-card-tpl">
     <li class="model-card">
       <div class="model-card-top">
+        <span class="expand-caret" aria-hidden="true">▸</span>
         <div class="model-meta">
           <span class="model-id"></span><span class="source-pill" hidden></span>
           <div class="model-sub"></div>
