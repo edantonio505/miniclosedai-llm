@@ -1,0 +1,20 @@
+# secrets / local config
+.env
+
+# python
+__pycache__/
+*.pyc
+.venv/
+env/
+
+# model weights / HF cache should never be committed
+*.safetensors
+*.bin
+hf_cache/
+
+# control-plane runtime state (per-machine; regenerated on first run)
+models.local.json
+.run/
+
+# runtime logs
+*.log

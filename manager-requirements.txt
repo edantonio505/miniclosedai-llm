@@ -1,0 +1,10 @@
+# Deps for the web control plane (app.py + model_manager.py) ONLY.
+# Deliberately lightweight — NO torch/vLLM here. The heavy ML stack runs inside
+# the vLLM container (Docker engine) or the vLLM you install separately for the
+# native engine (see README → RunPod). This keeps the manager fast to install
+# on any box.
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+pyyaml>=6.0
+httpx>=0.27.0
+python-multipart>=0.0.9

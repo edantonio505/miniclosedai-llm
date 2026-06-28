@@ -1,0 +1,326 @@
+# miniclosedai-llm — run any HuggingFace LLM locally, behind an OpenAI API
+
+Paste a HuggingFace model id, click **Download & Run**, and this serves it on your
+own GPU behind an **OpenAI-compatible `/v1` API** — then register it in a
+self-hosted [**miniclosedai**](../miniclosedai) gateway (Settings → Backends, kind
+`openai`) and use it for chats and bots, exactly like the built-in models.
+
+It runs **any LLM that vLLM supports — text *or* vision (VLM)** — with a built-in
+**Analyze** step (size / gated / does-it-fit before you download) and a **Quick
+test** box (send a prompt, optionally an image, see the answer). It's the sibling
+of [`miniclosedai`](../miniclosedai) (the gateway) and
+[`miniclosedai-voice`](../miniclosedai-voice) (ASR/TTS), and shares their look and
+conventions.
+
+- **Web GUI control plane** — a FastAPI dashboard (`./dev.sh`, port **8099**) that
+  downloads, launches, monitors, and tests models for you.
+- **Two launch engines, auto-detected** — **Docker** (`vllm/vllm-openai`) on a
+  normal GPU server, **native** (`vllm serve` subprocess) on RunPod pods with no
+  Docker daemon.
+- **Config-file workflow** — for reproducible, version-controlled fleets, drive
+  everything from [`models.yaml`](models.yaml) via `docker compose` / launch
+  scripts.
+- **Transformers shim** — an OpenAI-compatible fallback for models vLLM can't
+  serve yet.
+
+For deep internals (architecture, full API reference, status model, engine
+internals, schemas) see **[DOCUMENTATION.md](DOCUMENTATION.md)**.
+
+---
+
+## Table of contents
+
+- [Quick start (Web GUI)](#quick-start-web-gui)
+- [Using the dashboard](#using-the-dashboard)
+- [Launch engines (Docker vs native)](#launch-engines-docker-vs-native)
+- [Register a model in miniclosedai](#register-a-model-in-miniclosedai)
+- [Network access (LAN / RunPod)](#network-access-lan--runpod)
+- [Config-file workflow (compose + scripts)](#config-file-workflow-compose--scripts)
+- [Transformers shim (fallback)](#transformers-shim-fallback)
+- [Testing](#testing)
+- [Environment variables](#environment-variables)
+- [Requirements & VRAM](#requirements--vram)
+- [File layout](#file-layout)
+- [Troubleshooting](#troubleshooting)
+- [License / scope](#license--scope)
+
+---
+
+## Quick start (Web GUI)
+
+```bash
+git clone … && cd miniclosedai-llm
+cp .env.example .env          # set HF_TOKEN (only needed for gated models)
+./dev.sh                      # builds a tiny venv, runs the dashboard on :8099
+# open  http://<this-host>:8099   (or http://<LAN-IP>:8099 from another machine)
+```
+
+In the browser:
+
+1. Paste a model — e.g. `Qwen/Qwen2.5-7B-Instruct`, `meta-llama/Llama-3.1-8B-Instruct`,
+   or `Qwen/Qwen3-VL-8B-Instruct` (or a full `https://huggingface.co/…` URL).
+2. *(Optional)* **Analyze** — confirms it exists, whether it's gated, its size, and
+   whether it **fits in available memory** (warns with a "Run anyway" override).
+3. **Download & Run** — a card appears and walks `pulling → downloading → loading →
+   ready` (open **Logs** to watch). First run downloads weights (GB) and compiles
+   CUDA graphs, so it can take a few minutes; later runs are faster (cached).
+4. When **ready**, use the **Quick test** box (a prompt, plus an optional image for
+   vision models) and copy the **base_url** into miniclosedai.
+
+The dashboard itself needs **no GPU/ML libraries** — only FastAPI/httpx. All heavy
+work runs inside the model it launches.
+
+---
+
+## Using the dashboard
+
+| Element | What it does |
+|---|---|
+| **Banner** | Selected engine (Docker/native), GPU + memory readout, and the network URL the dashboard is reachable at. Red if no engine; amber if no GPU. |
+| **Analyze** | Queries HuggingFace: existence, gated status, params/dtype, weight size, estimated need vs free memory, text-vs-vision. No download. |
+| **Download & Run** | Allocates a port, writes the registry entry, and launches the model via the active engine. Returns immediately; status updates live. |
+| **Model card** | served-name, hf_id, port, a status pill (stopped / pulling / downloading / loading / ready / error), and Run / Stop / Logs / Remove. |
+| **Logs** | Live stream (SSE) of image pull + vLLM startup, so you can see exactly where a slow or failing load is. |
+| **Quick test** | Sends a chat to the running model and shows the reply + latency. For vision models, **+ Attach image** adds an image part (defaults to the bundled test image). |
+| **Register box** | The exact `base_url` to paste into miniclosedai, plus a `host.docker.internal` alternative for same-host Docker. |
+
+---
+
+## Launch engines (Docker vs native)
+
+The manager auto-detects how to run models. Override with `LAUNCH_ENGINE` in `.env`.
+
+| Engine | Selected when | How it runs a model |
+|---|---|---|
+| **Docker** (default on a server) | the docker daemon is reachable | `docker run` one `vllm/vllm-openai` container per model, GPU passed through, weights bind-mounted from `HF_HOME` |
+| **Native** | Docker unusable (e.g. a RunPod pod) and `vllm` is importable | `vllm serve` as a subprocess, logs to `.run/<name>.log` |
+
+`LAUNCH_ENGINE=auto` (default) → Docker if available, else native. Set `docker` or
+`native` to force one. Both engines build the **same** `vllm serve` flags from
+`_args.build_args`, so behavior is identical either way.
+
+---
+
+## Register a model in miniclosedai
+
+vLLM serves under `/v1`, and miniclosedai appends `/chat/completions` and `/models`
+to your base URL — so **the base URL must end in `/v1`**.
+
+In miniclosedai → **Settings → Backends → Add**:
+
+| Field | Value |
+|-------|-------|
+| **Kind** | `openai` |
+| **Name** | anything, e.g. `vLLM Qwen2.5-7B` |
+| **Base URL** | the dashboard's **Register box** value, e.g. `http://192.168.0.110:8001/v1` (LAN IP), or `http://host.docker.internal:8001/v1` if miniclosedai is a Docker container on the same host |
+| **API key** | any non-empty string (e.g. `EMPTY`) — vLLM ignores it **unless** you set `VLLM_API_KEY`, in which case enter that exact value |
+| **Headers** | none |
+
+Click **Test** → expect *"Reachable · 1 model"* → **Save**. The served-model-name
+now appears in miniclosedai's model dropdown for conversations and bots.
+
+> The served-model-name is stable and is what miniclosedai sends back as `model`.
+> For preset models it's the short name (`qwen3-vl-8b`); for a pasted model it's a
+> slug of the repo name (override it in **Advanced settings**).
+
+---
+
+## Network access (LAN / RunPod)
+
+**LAN.** The dashboard and every model server bind `0.0.0.0`, so they're reachable
+from other machines at `http://<LAN-IP>:8099` (dashboard) and `…:<port>` (models).
+The Register box advertises the detected **LAN IP** by default; pin it with
+`PUBLIC_HOST=192.168.0.110` if auto-detection picks the wrong interface. If a remote
+machine can't connect, open the ports (trusted networks only):
+
+```bash
+sudo ufw allow 8099/tcp          # dashboard
+sudo ufw allow 8001:8010/tcp     # model servers
+```
+
+**RunPod / pods without Docker.** Use a vLLM/PyTorch template (vLLM preinstalled),
+or `pip install vllm`. The manager auto-selects the **native** engine. Persist
+weights on the volume and launch:
+
+```bash
+echo "HF_HOME=/workspace/hf-cache" >> .env
+echo "HF_TOKEN=hf_xxx" >> .env
+./dev.sh
+```
+
+Expose port **8099** (and model ports **8001+**) via RunPod's HTTP proxy. The
+Register box detects `RUNPOD_POD_ID` and shows the public form
+`https://<podId>-<port>.proxy.runpod.net/v1`.
+
+---
+
+## Config-file workflow (compose + scripts)
+
+For a reproducible, curated fleet (the original use case — vision models for
+ID-document extraction), drive everything from [`models.yaml`](models.yaml) instead
+of the GUI. The repo ships presets: `qwen3-vl-8b` (+FP8), `internvl3-8b`,
+`qwen2.5-vl-7b`, `qwen3-vl-32b`, `internvl3-38b`.
+
+```bash
+cp .env.example .env                 # set HF_TOKEN
+./start.sh                           # default preset (qwen3-vl-8b) on :8001
+./start.sh --list                    # list profiles + ports
+./start.sh internvl3-8b              # a specific model (compose profile)
+./stop.sh                            # stop everything
+
+# or launch one model directly, no compose:
+./scripts/run_qwen3-vl-8b.sh         # docker run
+./scripts/run_internvl3-8b.sh --native   # bare `vllm serve`
+```
+
+`models.yaml` is the single source of truth; `python3 gen_compose.py` regenerates
+`docker-compose.yml` from it. Each model is a compose **profile** so nothing starts
+unless asked. Per-model fields: `hf_id`, `served_name`, `port`, `quantization`,
+`max_model_len`, `gpu_memory_util`, `tensor_parallel`, `max_images`,
+`trust_remote_code`, `mm_processor_kwargs`, `hf_overrides`, `extra_args`. See
+[DOCUMENTATION.md](DOCUMENTATION.md#modelsyaml-schema) for the full schema.
+
+The bundled vision smoke test (one image + two images in one request):
+
+```bash
+python3 smoke_test.py --base-url http://localhost:8001/v1 --model qwen3-vl-8b
+```
+
+---
+
+## Transformers shim (fallback)
+
+If vLLM doesn't support a model yet, serve it with the `transformers` shim — same
+OpenAI `/v1` surface, so miniclosedai needs no change:
+
+```bash
+SHIM_MODEL_ID=Qwen/Qwen2.5-VL-7B-Instruct SHIM_SERVED_NAME=qwen2.5-vl-7b \
+  ./start.sh shim          # -> http://localhost:8009/v1
+
+# or native:
+pip install -r shim/requirements.txt
+SHIM_MODEL_ID=OpenGVLab/InternVL3-8B-HF SHIM_SERVED_NAME=internvl3-8b \
+  SHIM_PORT=8009 python3 shim/server.py
+```
+
+It loads via `AutoProcessor` + `AutoModelForImageTextToText`, decodes base64
+`image_url` data-URLs into PIL images, and supports streaming + non-streaming.
+Config via env (top of `shim/server.py`).
+
+---
+
+## Testing
+
+Two harnesses (standard-library only):
+
+- **`e2e_test.py`** — regression test that drives the **running dashboard** like the
+  GUI: for each small model, add+run → wait for `ready` → text chat (asserting two
+  different prompts give two different answers) → image chat for vision models →
+  stop + remove. Exits non-zero on any failure. The default set covers a small text
+  model and a small vision model.
+
+  ```bash
+  ./dev.sh                                   # dashboard must be running
+  python3 e2e_test.py --quick                # tiny text models only (fast)
+  python3 e2e_test.py                        # + a small vision model
+  python3 e2e_test.py --models Qwen/Qwen2.5-1.5B-Instruct
+  python3 e2e_test.py --base http://192.168.0.110:8099 --timeout 1200
+  ```
+
+- **`smoke_test.py`** — direct vision check against a single running vLLM `/v1`
+  endpoint (one image + a two-image request). For the config-file workflow.
+
+---
+
+## Environment variables
+
+All optional; copy `.env.example` → `.env`. (See [DOCUMENTATION.md](DOCUMENTATION.md#configuration) for full descriptions.)
+
+| Var | Default | Purpose |
+|---|---|---|
+| `HF_TOKEN` | — | HuggingFace token; required for **gated** models (Llama, etc.) |
+| `HF_HOME` | `~/.cache/huggingface` | weight cache (set to a volume on RunPod) |
+| `MANAGER_PORT` | `8099` | dashboard port |
+| `LAUNCH_ENGINE` | `auto` | `auto` / `docker` / `native` |
+| `PUBLIC_HOST` | auto LAN IP | host advertised in the Register box |
+| `MANAGER_API_KEY` | — | optional Bearer token to protect the dashboard/API |
+| `VLLM_IMAGE` | `vllm/vllm-openai:latest` | Docker image tag |
+| `VLLM_API_KEY` | — | if set, vLLM enforces it; put the same value in miniclosedai |
+
+---
+
+## Requirements & VRAM
+
+- **NVIDIA GPU + working driver** (`nvidia-smi` must print a table — see
+  Troubleshooting if it errors after an update).
+- **Docker + NVIDIA Container Toolkit** (Docker engine) *or* **vLLM installed**
+  (native engine). The manager itself only needs Python 3.10+.
+- **Disk** for weights (an 8B model is ~16–20 GB).
+
+Approx. footprint of the bundled **preset** vision models:
+
+| served-name | repo | quant | approx. weights |
+|---|---|---|---|
+| `qwen3-vl-8b` | `Qwen/Qwen3-VL-8B-Instruct` | bf16 | ~18–20 GB |
+| `qwen3-vl-8b` (FP8) | `…-Instruct-FP8` | fp8 | ~12 GB |
+| `internvl3-8b` | `OpenGVLab/InternVL3-8B-HF` | bf16 | ~18–20 GB |
+| `qwen2.5-vl-7b` | `Qwen/Qwen2.5-VL-7B-Instruct` | bf16 | ~17–19 GB |
+| `qwen3-vl-32b` | `Qwen/Qwen3-VL-32B-Instruct-FP8` | fp8 | ~34–38 GB |
+| `internvl3-38b` | `OpenGVLab/InternVL3-38B-AWQ` | awq | ~48 GB card |
+
+The **Analyze** step estimates this for any model you paste and compares it to free
+memory. On **unified-memory** parts (e.g. NVIDIA GB10) the GPU shares system RAM, so
+the manager sizes `gpu_memory_utilization` from **free** memory, not total.
+
+---
+
+## File layout
+
+| Path | Purpose |
+|---|---|
+| `app.py` | FastAPI control plane (the dashboard backend) |
+| `model_manager.py` | Engine abstraction, registry, HF analysis, status, base_url |
+| `static/` | Dashboard UI (`index.html`, `style.css`, `app.js`) |
+| `dev.sh` | One-command launcher (venv + preflight + uvicorn) |
+| `manager-requirements.txt` | Dashboard deps (no torch/vLLM) |
+| `Dockerfile.manager` | Optional: run the control plane itself in a container |
+| `models.yaml` | Preset fleet + serving config (source of truth) |
+| `_args.py` | `models.yaml` row → `vllm serve` flags (shared everywhere) |
+| `gen_compose.py` | Generates `docker-compose.yml` from `models.yaml` |
+| `docker-compose.yml` | Generated; one profile-gated service per preset |
+| `scripts/run_*.sh` | Per-model launchers (docker or native) |
+| `start.sh` / `stop.sh` | Compose up/down by profile |
+| `e2e_test.py` | End-to-end regression harness (drives the dashboard) |
+| `smoke_test.py` | Direct vision smoke test against a vLLM `/v1` |
+| `tests/test_image.png` | Bundled labelled test image |
+| `shim/` | transformers fallback (`server.py`, `Dockerfile`, `requirements.txt`) |
+| `models.local.json` | (generated) per-machine registry state — gitignored |
+| `.run/` | (generated) native logs + docker orchestration logs — gitignored |
+
+---
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `nvidia-smi`: **"Driver/library version mismatch"** | The kernel module ≠ userspace driver after an update. **Reboot** (the package manager sets `/var/run/reboot-required`). GPU passthrough won't work until `nvidia-smi` prints a table. |
+| Launch **times out / "No such container"** | First run downloads a multi-GB image. The manager now pulls in a streamed background step (watch **Logs**) — just wait. |
+| **CUDA out of memory** / *"Free memory … less than desired GPU memory utilization"* | Lower `gpu_memory_util` (Advanced), reduce `max_model_len`, or pick a smaller/quantized model. On unified memory the manager already sizes from free memory. |
+| Model errors immediately with **`unrecognized arguments`** | A vLLM flag changed/was removed in your image version (e.g. the old `--guided-decoding-backend`). Remove it from `models.yaml` / Advanced, or pin an older `VLLM_IMAGE`. |
+| **`401 / 403` / GatedRepoError** in logs | Gated model — set `HF_TOKEN` in `.env` and accept the model's license on HuggingFace. Analyze flags this up front. |
+| **"model architecture not supported"** | vLLM doesn't support it yet — pin a newer `VLLM_IMAGE`, or use the **shim**. |
+| miniclosedai **Test** fails / `host.docker.internal` won't resolve | Use the LAN IP base URL, or ensure miniclosedai's container has `extra_hosts: ["host.docker.internal:host-gateway"]`. |
+| **"Reachable but 0 models"** in miniclosedai | Base URL missing `/v1`, or the model is still loading. |
+| Dashboard unreachable from another machine | Open the firewall ports (above); confirm `0.0.0.0` binding (default). |
+
+More in [DOCUMENTATION.md → Troubleshooting](DOCUMENTATION.md#troubleshooting).
+
+---
+
+## License / scope
+
+This project provides the **model server + dashboard + its miniclosedai
+registration** only. The extraction/benchmarking prompts live elsewhere. Stable,
+documented served-model-names make models selectable when creating bots in
+miniclosedai. License: see [LICENSE](../miniclosedai/LICENSE) of the umbrella
+project.

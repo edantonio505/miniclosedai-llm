@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Model Server · miniclosedai-llm</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <link rel="stylesheet" href="style.css" />
+  <!-- Apply saved theme BEFORE paint to avoid flash-of-wrong-theme. -->
+  <script>
+    (function () {
+      try {
+        const saved = localStorage.getItem("miniclosedai-llm:theme") || "system";
+        const systemDark = matchMedia("(prefers-color-scheme: dark)").matches;
+        if (saved === "dark" || (saved === "system" && systemDark))
+          document.documentElement.classList.add("dark");
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-text">
+      <h1>Model Server</h1>
+      <p class="sub">Paste any HuggingFace LLM (text or vision), run it here, and register it in miniclosedai.</p>
+    </div>
+    <button id="theme-toggle" class="theme-toggle-btn" title="Theme: system" aria-label="Toggle theme">
+      <svg id="theme-icon-light" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+      <svg id="theme-icon-dark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      <svg id="theme-icon-system" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+    </button>
+  </header>
+
+  <main class="container">
+    <!-- ============= preflight banner ============= -->
+    <div id="banner" class="banner">Checking environment…</div>
+
+    <!-- ============= add model ============= -->
+    <section class="card">
+      <h2>Add a model</h2>
+      <form id="add-form">
+        <div class="add-row">
+          <input id="hf-id" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="meta-llama/Llama-3.1-8B-Instruct  or  https://huggingface.co/…" />
+          <button id="analyze-btn" type="button" class="btn">Analyze</button>
+          <button id="run-btn" type="submit" class="btn btn-primary">Download &amp; Run</button>
+        </div>
+        <div id="analyze-result" class="analyze-result" hidden></div>
+        <details class="advanced">
+          <summary>Advanced settings</summary>
+          <div class="advanced-grid">
+            <label class="field"><span>Served name (model id)</span><input id="adv-served" type="text" placeholder="auto from repo name" /></label>
+            <label class="field"><span>Port</span><input id="adv-port" type="number" placeholder="auto (8001+)" min="1024" max="65535" /></label>
+            <label class="field"><span>Quantization</span>
+              <select id="adv-quant">
+                <option value="">none / auto-detect</option>
+                <option value="fp8">fp8</option>
+                <option value="awq">awq</option>
+                <option value="gptq">gptq</option>
+              </select>
+            </label>
+            <label class="field"><span>Max model len</span><input id="adv-maxlen" type="number" placeholder="16384" /></label>
+            <label class="field"><span>GPU mem util (0–1)</span><input id="adv-gpumem" type="number" step="0.05" min="0.1" max="1" placeholder="0.90" /></label>
+            <label class="field"><span>Tensor parallel (#GPUs)</span><input id="adv-tp" type="number" min="1" placeholder="1" /></label>
+            <label class="field"><span>Max images / request</span><input id="adv-maximg" type="number" min="1" placeholder="5" /></label>
+            <label class="field field-check"><input id="adv-trust" type="checkbox" /><span>trust_remote_code <span class="warn-text">(runs repo code — needed for InternVL)</span></span></label>
+            <label class="field full"><span>mm_processor_kwargs (JSON — Qwen small-text fidelity)</span><textarea id="adv-mmproc" rows="2" placeholder='{"max_pixels": 1605632}'></textarea></label>
+            <label class="field full"><span>hf_overrides (JSON — InternVL patch budget)</span><textarea id="adv-hfover" rows="2" placeholder='{"max_dynamic_patch": 24}'></textarea></label>
+            <label class="field full"><span>Extra vLLM flags</span><input id="adv-extra" type="text" placeholder="--max-num-seqs 8" /></label>
+          </div>
+        </details>
+        <p id="add-error" class="error" hidden></p>
+        <p class="hint"><strong>Analyze</strong> first to check the model type, size, and whether it
+          fits in memory — then <strong>Download &amp; Run</strong>. Works for text and vision LLMs that
+          vLLM supports. First run downloads the weights (several GB) — watch the per-model logs.</p>
+      </form>
+    </section>
+
+    <!-- ============= models ============= -->
+    <section class="card">
+      <div class="models-head">
+        <h2>Models</h2>
+        <button id="refresh-btn" type="button" class="btn btn-small">Refresh</button>
+      </div>
+      <ul id="models-list" class="models-list" aria-live="polite"></ul>
+      <p id="models-empty" class="hint" hidden>No models yet. Paste one above to get started.</p>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" hidden aria-live="polite"></div>
+
+  <!-- model card template -->
+  <template id="model-card-tpl">
+    <li class="model-card">
+      <div class="model-card-top">
+        <div class="model-meta">
+          <span class="model-id"></span><span class="source-pill" hidden></span>
+          <div class="model-sub"></div>
+        </div>
+        <span class="status-pill"><span class="led"></span><span class="status-text"></span></span>
+        <div class="model-actions">
+          <button class="btn btn-small act-run" type="button">Run</button>
+          <button class="btn btn-small act-stop" type="button" hidden>Stop</button>
+          <button class="btn btn-small act-logs" type="button">Logs</button>
+          <button class="btn btn-small btn-danger act-remove" type="button">Remove</button>
+        </div>
+      </div>
+      <div class="model-body" hidden>
+        <div class="register-block">
+          <div class="section-label">Register in miniclosedai (Settings → Backends)</div>
+          <div class="copy-box">
+            <span class="kind">Kind: <strong>openai</strong> · Base URL:</span>
+            <code class="base-url"></code>
+            <button class="btn btn-small act-copy" type="button">Copy</button>
+          </div>
+          <p class="hint alt-hint">Same-host Docker miniclosedai? Use <code class="alt-base-url"></code> instead.</p>
+        </div>
+        <div class="test-block">
+          <div class="section-label">Quick test</div>
+          <div class="test-panel">
+            <div class="test-row">
+              <div class="test-img-wrap" hidden>
+                <img class="test-img" alt="test image" />
+                <input class="test-file" type="file" accept="image/*" hidden />
+                <div><button class="btn btn-small act-pick" type="button">Change image</button></div>
+              </div>
+              <div class="test-controls">
+                <textarea class="test-prompt">Reply with a short sentence to confirm you are working.</textarea>
+                <div class="test-actions">
+                  <button class="btn btn-small btn-primary act-test" type="button">Run test</button>
+                  <button class="btn btn-small act-addimg" type="button" hidden>+ Attach image</button>
+                </div>
+              </div>
+            </div>
+            <div class="test-answer" hidden></div>
+          </div>
+        </div>
+        <div class="logs-block" hidden>
+          <div class="section-label">Logs</div>
+          <pre class="logs-view"></pre>
+        </div>
+        <p class="model-error error" hidden></p>
+      </div>
+    </li>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>

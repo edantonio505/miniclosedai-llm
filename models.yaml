@@ -1,0 +1,141 @@
+# models.yaml — single source of truth for the vLLM VLM server fleet.
+#
+# Everything (docker-compose.yml, the run_*.sh scripts, start.sh) is generated
+# from / reads this file. Add or edit a model here, regenerate compose with
+# `python3 gen_compose.py`, and you are done. No paths or secrets live here.
+#
+# Field reference (per model):
+#   hf_id              HuggingFace repo id passed to `vllm serve <hf_id>`.
+#   served_name        The OpenAI model id this is exposed as. THIS is the
+#                      string miniclosedai shows in its model dropdown and sends
+#                      back as the `model` field. Keep it stable + documented.
+#   port               Host port to bind (0.0.0.0:<port>). One port per model.
+#   dtype              bf16 | fp8 | awq | auto  (informational + maps to flags).
+#   quantization       vLLM --quantization value, or null. (fp8 models are
+#                      usually pre-quantized so this stays null; set for awq/gptq.)
+#   max_model_len      vLLM --max-model-len (context window). Lower to save VRAM.
+#   gpu_memory_util    vLLM --gpu-memory-utilization (0..1). Lower if OOM.
+#   tensor_parallel    vLLM --tensor-parallel-size (#GPUs to shard across).
+#   max_images         Max image_url parts accepted per request (multi-page IDs).
+#   trust_remote_code  true for models with custom code (InternVL needs it).
+#   mm_processor_kwargs  JSON passed to --mm-processor-kwargs (Qwen pixel budget).
+#   hf_overrides         JSON passed to --hf-overrides (InternVL patch budget).
+#   extra_args         Free-form list of extra `vllm serve` flags.
+#   profile            docker-compose profile name (so you start only what you want).
+#   vram_estimate      Rough peak VRAM for sizing (documentation only).
+#   enabled            If false, skipped by gen_compose.py / start.sh.
+
+defaults:
+  image: "vllm/vllm-openai:latest"
+  # --guided-decoding-backend was REMOVED in recent vLLM (structured/JSON output
+  # is on by default now via the auto backend). Leave null; set a value only for
+  # an older vLLM image that still accepts the flag.
+  guided_decoding_backend: null
+  api_key: ""                            # empty => server accepts any key (vLLM ignores auth)
+
+models:
+  # ----------------------------------------------------------------- primary (24 GB) ---
+  - hf_id: "Qwen/Qwen3-VL-8B-Instruct"
+    served_name: "qwen3-vl-8b"
+    port: 8001
+    dtype: "bf16"
+    quantization: null
+    max_model_len: 16384
+    gpu_memory_util: 0.90
+    tensor_parallel: 1
+    max_images: 5
+    trust_remote_code: false
+    mm_processor_kwargs: '{"max_pixels": 1605632}'   # ~1.6M px: fidelity for tiny ID print
+    hf_overrides: null
+    extra_args: []
+    profile: "qwen3-vl-8b"
+    vram_estimate: "~18-20 GB (bf16)"
+    enabled: true
+
+  # FP8 variant of the above — fits ~12 GB. Swap to this on a smaller card.
+  - hf_id: "Qwen/Qwen3-VL-8B-Instruct-FP8"
+    served_name: "qwen3-vl-8b"            # same served name on purpose: drop-in swap
+    port: 8001
+    dtype: "fp8"
+    quantization: null                    # repo is already FP8; no --quantization needed
+    max_model_len: 16384
+    gpu_memory_util: 0.90
+    tensor_parallel: 1
+    max_images: 5
+    trust_remote_code: false
+    mm_processor_kwargs: '{"max_pixels": 1605632}'
+    hf_overrides: null
+    extra_args: []
+    profile: "qwen3-vl-8b-fp8"
+    vram_estimate: "~12 GB (fp8)"
+    enabled: false
+
+  - hf_id: "OpenGVLab/InternVL3-8B-HF"
+    served_name: "internvl3-8b"
+    port: 8002
+    dtype: "bf16"
+    quantization: null
+    max_model_len: 16384
+    gpu_memory_util: 0.90
+    tensor_parallel: 1
+    max_images: 5
+    trust_remote_code: true               # InternVL ships custom modeling code
+    mm_processor_kwargs: null
+    hf_overrides: '{"max_dynamic_patch": 24}'   # more tiles => sharper small text
+    extra_args: []
+    profile: "internvl3-8b"
+    vram_estimate: "~18-20 GB (bf16)"
+    enabled: true
+
+  # ------------------------------------------------ battle-tested fallback (24 GB) ---
+  - hf_id: "Qwen/Qwen2.5-VL-7B-Instruct"
+    served_name: "qwen2.5-vl-7b"
+    port: 8003
+    dtype: "bf16"
+    quantization: null
+    max_model_len: 16384
+    gpu_memory_util: 0.90
+    tensor_parallel: 1
+    max_images: 5
+    trust_remote_code: false
+    mm_processor_kwargs: '{"max_pixels": 1605632}'
+    hf_overrides: null
+    extra_args: []
+    profile: "qwen2.5-vl-7b"
+    vram_estimate: "~17-19 GB (bf16)"
+    enabled: false
+
+  # ----------------------------------------------- headroom: 48-80 GB / multi-GPU ---
+  - hf_id: "Qwen/Qwen3-VL-32B-Instruct-FP8"
+    served_name: "qwen3-vl-32b"
+    port: 8004
+    dtype: "fp8"
+    quantization: null
+    max_model_len: 16384
+    gpu_memory_util: 0.92
+    tensor_parallel: 1                     # bump to 2 to split across 2x 24-40 GB cards
+    max_images: 5
+    trust_remote_code: false
+    mm_processor_kwargs: '{"max_pixels": 1605632}'
+    hf_overrides: null
+    extra_args: []
+    profile: "qwen3-vl-32b"
+    vram_estimate: "~34-38 GB (fp8)"
+    enabled: false
+
+  - hf_id: "OpenGVLab/InternVL3-38B-AWQ"
+    served_name: "internvl3-38b"
+    port: 8005
+    dtype: "awq"
+    quantization: "awq"
+    max_model_len: 16384
+    gpu_memory_util: 0.92
+    tensor_parallel: 1
+    max_images: 5
+    trust_remote_code: true
+    mm_processor_kwargs: null
+    hf_overrides: '{"max_dynamic_patch": 24}'
+    extra_args: []
+    profile: "internvl3-38b"
+    vram_estimate: "~a 48 GB card (awq)"
+    enabled: false

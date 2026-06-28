@@ -1,0 +1,13 @@
+# transformers fallback shim deps. Install torch matching your CUDA separately
+# (see https://pytorch.org) if not using the provided Dockerfile.
+transformers>=4.49.0
+accelerate>=0.34.0
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+pydantic>=2.6.0
+pillow>=10.0.0
+# Model-specific extras commonly needed by Qwen-VL / InternVL processors:
+qwen-vl-utils
+einops
+timm
+sentencepiece

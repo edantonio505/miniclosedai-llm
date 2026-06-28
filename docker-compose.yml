@@ -1,0 +1,322 @@
+# ============================================================================
+# GENERATED FILE — do not edit by hand.
+# Edit models.yaml, then run:  python3 gen_compose.py
+# ----------------------------------------------------------------------------
+# One service per model, each behind a compose `profile` (so it only starts
+# when selected). Bring a model up with start.sh or directly:
+#     docker compose --profile qwen3-vl-8b up -d
+# vLLM binds 0.0.0.0:<port>; register it in miniclosedai as an `openai`
+# backend with base_url  http://host.docker.internal:<port>/v1
+# ============================================================================
+
+services:
+  qwen3-vl-8b:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
+    profiles:
+    - qwen3-vl-8b
+    entrypoint:
+    - vllm
+    - serve
+    command:
+    - Qwen/Qwen3-VL-8B-Instruct
+    - --served-model-name
+    - qwen3-vl-8b
+    - --host
+    - 0.0.0.0
+    - --port
+    - '8001'
+    - --max-model-len
+    - '16384'
+    - --gpu-memory-utilization
+    - '0.9'
+    - --tensor-parallel-size
+    - '1'
+    - --limit-mm-per-prompt
+    - '{"image": 5}'
+    - --mm-processor-kwargs
+    - '{"max_pixels": 1605632}'
+    ports:
+    - 8001:8001
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+      HF_HOME: /root/.cache/huggingface
+      VLLM_API_KEY: ${VLLM_API_KEY:-}
+    volumes:
+    - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+    ipc: host
+    shm_size: 16gb
+    deploy: &id001
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            count: all
+            capabilities:
+            - gpu
+    restart: unless-stopped
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/health').status==200 else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 600s
+  qwen3-vl-8b-fp8:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
+    profiles:
+    - qwen3-vl-8b-fp8
+    entrypoint:
+    - vllm
+    - serve
+    command:
+    - Qwen/Qwen3-VL-8B-Instruct-FP8
+    - --served-model-name
+    - qwen3-vl-8b
+    - --host
+    - 0.0.0.0
+    - --port
+    - '8001'
+    - --max-model-len
+    - '16384'
+    - --gpu-memory-utilization
+    - '0.9'
+    - --tensor-parallel-size
+    - '1'
+    - --limit-mm-per-prompt
+    - '{"image": 5}'
+    - --mm-processor-kwargs
+    - '{"max_pixels": 1605632}'
+    ports:
+    - 8001:8001
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+      HF_HOME: /root/.cache/huggingface
+      VLLM_API_KEY: ${VLLM_API_KEY:-}
+    volumes:
+    - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+    ipc: host
+    shm_size: 16gb
+    deploy: *id001
+    restart: unless-stopped
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/health').status==200 else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 600s
+  internvl3-8b:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
+    profiles:
+    - internvl3-8b
+    entrypoint:
+    - vllm
+    - serve
+    command:
+    - OpenGVLab/InternVL3-8B-HF
+    - --served-model-name
+    - internvl3-8b
+    - --host
+    - 0.0.0.0
+    - --port
+    - '8002'
+    - --max-model-len
+    - '16384'
+    - --gpu-memory-utilization
+    - '0.9'
+    - --tensor-parallel-size
+    - '1'
+    - --limit-mm-per-prompt
+    - '{"image": 5}'
+    - --trust-remote-code
+    - --hf-overrides
+    - '{"max_dynamic_patch": 24}'
+    ports:
+    - 8002:8002
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+      HF_HOME: /root/.cache/huggingface
+      VLLM_API_KEY: ${VLLM_API_KEY:-}
+    volumes:
+    - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+    ipc: host
+    shm_size: 16gb
+    deploy: *id001
+    restart: unless-stopped
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8002/health').status==200 else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 600s
+  qwen2.5-vl-7b:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
+    profiles:
+    - qwen2.5-vl-7b
+    entrypoint:
+    - vllm
+    - serve
+    command:
+    - Qwen/Qwen2.5-VL-7B-Instruct
+    - --served-model-name
+    - qwen2.5-vl-7b
+    - --host
+    - 0.0.0.0
+    - --port
+    - '8003'
+    - --max-model-len
+    - '16384'
+    - --gpu-memory-utilization
+    - '0.9'
+    - --tensor-parallel-size
+    - '1'
+    - --limit-mm-per-prompt
+    - '{"image": 5}'
+    - --mm-processor-kwargs
+    - '{"max_pixels": 1605632}'
+    ports:
+    - 8003:8003
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+      HF_HOME: /root/.cache/huggingface
+      VLLM_API_KEY: ${VLLM_API_KEY:-}
+    volumes:
+    - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+    ipc: host
+    shm_size: 16gb
+    deploy: *id001
+    restart: unless-stopped
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8003/health').status==200 else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 600s
+  qwen3-vl-32b:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
+    profiles:
+    - qwen3-vl-32b
+    entrypoint:
+    - vllm
+    - serve
+    command:
+    - Qwen/Qwen3-VL-32B-Instruct-FP8
+    - --served-model-name
+    - qwen3-vl-32b
+    - --host
+    - 0.0.0.0
+    - --port
+    - '8004'
+    - --max-model-len
+    - '16384'
+    - --gpu-memory-utilization
+    - '0.92'
+    - --tensor-parallel-size
+    - '1'
+    - --limit-mm-per-prompt
+    - '{"image": 5}'
+    - --mm-processor-kwargs
+    - '{"max_pixels": 1605632}'
+    ports:
+    - 8004:8004
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+      HF_HOME: /root/.cache/huggingface
+      VLLM_API_KEY: ${VLLM_API_KEY:-}
+    volumes:
+    - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+    ipc: host
+    shm_size: 16gb
+    deploy: *id001
+    restart: unless-stopped
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8004/health').status==200 else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 600s
+  internvl3-38b:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
+    profiles:
+    - internvl3-38b
+    entrypoint:
+    - vllm
+    - serve
+    command:
+    - OpenGVLab/InternVL3-38B-AWQ
+    - --served-model-name
+    - internvl3-38b
+    - --host
+    - 0.0.0.0
+    - --port
+    - '8005'
+    - --max-model-len
+    - '16384'
+    - --gpu-memory-utilization
+    - '0.92'
+    - --tensor-parallel-size
+    - '1'
+    - --limit-mm-per-prompt
+    - '{"image": 5}'
+    - --quantization
+    - awq
+    - --trust-remote-code
+    - --hf-overrides
+    - '{"max_dynamic_patch": 24}'
+    ports:
+    - 8005:8005
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+      HF_HOME: /root/.cache/huggingface
+      VLLM_API_KEY: ${VLLM_API_KEY:-}
+    volumes:
+    - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+    ipc: host
+    shm_size: 16gb
+    deploy: *id001
+    restart: unless-stopped
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8005/health').status==200 else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 600s
+  shim:
+    build:
+      context: ./shim
+    image: miniclosedai-vlm-shim:latest
+    profiles:
+    - shim
+    ports:
+    - ${SHIM_PORT:-8009}:${SHIM_PORT:-8009}
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+      HF_HOME: /root/.cache/huggingface
+      SHIM_MODEL_ID: ${SHIM_MODEL_ID:-Qwen/Qwen2.5-VL-7B-Instruct}
+      SHIM_SERVED_NAME: ${SHIM_SERVED_NAME:-qwen2.5-vl-7b}
+      SHIM_PORT: ${SHIM_PORT:-8009}
+      SHIM_MAX_IMAGES: ${SHIM_MAX_IMAGES:-5}
+      SHIM_API_KEY: ${VLLM_API_KEY:-}
+    volumes:
+    - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+    ipc: host
+    shm_size: 16gb
+    deploy: *id001
+    restart: unless-stopped
