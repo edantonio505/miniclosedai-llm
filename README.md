@@ -78,8 +78,9 @@ work runs inside the model it launches.
 |---|---|
 | **Banner** | Selected engine (Docker/native), GPU + memory readout, and the network URL the dashboard is reachable at. Red if no engine; amber if no GPU. |
 | **Analyze** | Queries HuggingFace: existence, gated status, params/dtype, weight size, estimated need vs free memory, text-vs-vision. No download. |
-| **Download & Run** | Allocates a port, writes the registry entry, and launches the model via the active engine. Returns immediately; status updates live. |
-| **Model card** | served-name, hf_id, port, a status pill (stopped / pulling / downloading / loading / ready / error), and Run / Stop / Logs / Remove. |
+| **Download & Run** | Allocates a port, writes the registry entry, and launches the model via the active engine. Returns immediately; status updates live. A model is launched **once** per id — re-running an already-running model is rejected, not duplicated. |
+| **Downloaded models** | A library of LLMs **already in the HF cache** (with sizes). **Run** loads one straight from disk — no re-download; **Free** deletes its weights to reclaim space. |
+| **Model card** | served-name, hf_id, port, a status pill (stopped / pulling / downloading / loading / ready / error), and Run / Stop / Logs / Remove. Click the header to **collapse/expand** the card. |
 | **Logs** | Live stream (SSE) of image pull + vLLM startup, so you can see exactly where a slow or failing load is. |
 | **Quick test** | Sends a chat to the running model and shows the reply + latency. For vision models, **+ Attach image** adds an image part (defaults to the bundled test image). |
 | **Register box** | The exact `base_url` to paste into miniclosedai, plus a `host.docker.internal` alternative for same-host Docker. |
@@ -178,7 +179,7 @@ cp .env.example .env                 # set HF_TOKEN
 unless asked. Per-model fields: `hf_id`, `served_name`, `port`, `quantization`,
 `max_model_len`, `gpu_memory_util`, `tensor_parallel`, `max_images`,
 `trust_remote_code`, `mm_processor_kwargs`, `hf_overrides`, `extra_args`. See
-[DOCUMENTATION.md](DOCUMENTATION.md#modelsyaml-schema) for the full schema.
+[DOCUMENTATION.md](DOCUMENTATION.md#7-modelsyaml-schema) for the full schema.
 
 The bundled vision smoke test (one image + two images in one request):
 
@@ -216,8 +217,9 @@ Two harnesses (standard-library only):
 - **`e2e_test.py`** — regression test that drives the **running dashboard** like the
   GUI: for each small model, add+run → wait for `ready` → text chat (asserting two
   different prompts give two different answers) → image chat for vision models →
-  stop + remove. Exits non-zero on any failure. The default set covers a small text
-  model and a small vision model.
+  stop + remove. Exits non-zero on any failure. `--quick` runs two tiny text models
+  (`Qwen/Qwen2.5-0.5B-Instruct`, `HuggingFaceTB/SmolLM2-360M-Instruct`); the default
+  adds a small vision model (`Qwen/Qwen2.5-VL-3B-Instruct`).
 
   ```bash
   ./dev.sh                                   # dashboard must be running
@@ -227,6 +229,8 @@ Two harnesses (standard-library only):
   python3 e2e_test.py --base http://192.168.0.110:8099 --timeout 1200
   ```
 
+  All three default models have been verified loading + answering on an NVIDIA GB10.
+
 - **`smoke_test.py`** — direct vision check against a single running vLLM `/v1`
   endpoint (one image + a two-image request). For the config-file workflow.
 
@@ -234,7 +238,7 @@ Two harnesses (standard-library only):
 
 ## Environment variables
 
-All optional; copy `.env.example` → `.env`. (See [DOCUMENTATION.md](DOCUMENTATION.md#configuration) for full descriptions.)
+All optional; copy `.env.example` → `.env`. (See [DOCUMENTATION.md](DOCUMENTATION.md#10-configuration-environment) for full descriptions.)
 
 | Var | Default | Purpose |
 |---|---|---|
@@ -256,6 +260,45 @@ All optional; copy `.env.example` → `.env`. (See [DOCUMENTATION.md](DOCUMENTAT
 - **Docker + NVIDIA Container Toolkit** (Docker engine) *or* **vLLM installed**
   (native engine). The manager itself only needs Python 3.10+.
 - **Disk** for weights (an 8B model is ~16–20 GB).
+
+### First-time setup on a fresh Ubuntu GPU box
+
+Everything the Docker engine needs (the default), end to end:
+
+```bash
+# 1. NVIDIA driver — verify it works (install via your distro if not):
+nvidia-smi                              # must print a GPU table
+
+# 2. Docker:
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker "$USER"         # then log out/in so `docker` works sans sudo
+
+# 3. NVIDIA Container Toolkit (lets containers see the GPU):
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+  | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+  | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker
+
+# 4. Confirm containers can see the GPU:
+docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi   # GPU table
+
+# 5. Clone + run:
+git clone <repo-url> && cd miniclosedai-llm
+cp .env.example .env                    # set HF_TOKEN only for gated models
+./dev.sh                                # -> http://<host>:8099
+```
+
+Then paste a HuggingFace model id in the browser and click **Download & Run**.
+That's it — `dev.sh` builds the manager's venv, prints the selected engine + GPU,
+and serves the dashboard. The first model launch pulls the `vllm/vllm-openai`
+image (~21 GB, once) and the model weights; subsequent runs reuse both.
+
+> On **RunPod** (no Docker daemon), skip steps 2–4 and use a vLLM template (or
+> `pip install vllm`) — the manager auto-selects the native engine. See
+> [Network access](#network-access-lan--runpod).
 
 Approx. footprint of the bundled **preset** vision models:
 
@@ -313,7 +356,7 @@ the manager sizes `gpu_memory_utilization` from **free** memory, not total.
 | **"Reachable but 0 models"** in miniclosedai | Base URL missing `/v1`, or the model is still loading. |
 | Dashboard unreachable from another machine | Open the firewall ports (above); confirm `0.0.0.0` binding (default). |
 
-More in [DOCUMENTATION.md → Troubleshooting](DOCUMENTATION.md#troubleshooting).
+More in [DOCUMENTATION.md → Troubleshooting](DOCUMENTATION.md#17-troubleshooting).
 
 ---
 

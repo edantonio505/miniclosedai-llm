@@ -120,10 +120,14 @@ There are **two independent ways** to run models; they share `models.yaml` and
    compares estimated need to free memory. If the model doesn't exist → `400`. If
    it doesn't fit and `force` is not set → `409` with the analysis attached (the UI
    surfaces a "Run anyway" button).
-3. Allocate a unique `served_name` (slug of the repo name, de-duplicated) and the
-   next free port (≥ 8001, both registry-free and OS-bindable).
-4. Decide serving params: defaults merged with any overrides; `gpu_memory_util`
-   sized adaptively from free memory; image flags cleared for text-only models.
+3. Decide serving params: defaults merged with any overrides; `max_model_len`
+   **capped to the model's native context** (`max_position_embeddings`, so vLLM
+   isn't asked for more than the model supports); `gpu_memory_util` sized
+   adaptively from free memory; image flags cleared for text-only models.
+4. **Under a lock**: reject if the same `hf_id` is already running (one launch per
+   model — prevents accidental duplicates from a double-click / two tabs), then
+   allocate a unique `served_name` (slug, de-duplicated) and the next free port
+   (≥ 8001, both registry-free and OS-bindable), and create the entry.
 5. Persist the entry to `models.local.json`, then (if `run`) call `start()`.
 6. `start()` → the active engine's `launch()`, which is **non-blocking**: it kicks
    off the image pull (Docker) or the `vllm serve` subprocess (native) and returns
@@ -186,7 +190,7 @@ workloads on boot, to avoid surprise contention).
 |---|---|---|
 | `stopped` | not running, user intent stopped | engine `absent`, `desired_state != running` |
 | `pulling` | image/weights downloading, no container yet | engine `absent`, `desired_state == running`, no error in log |
-| `downloading` | container up, fetching weights | `running`, not serving, logs show download markers |
+| `downloading` | container up, fetching weights (only when NOT already cached) | `running`, not serving, download markers in logs **and** `is_cached()` is false |
 | `loading` | container up, loading/compiling | `running`, not serving, no error markers |
 | `ready` | serving | `running` **and** `GET /v1/models` returns 200 with the served name |
 | `error` | crashed or failed to start | engine `exited`, or error markers in logs (OOM, `401`, `no matching manifest`, `MANAGER-ERROR`, traceback) |
@@ -195,6 +199,12 @@ workloads on boot, to avoid surprise contention).
 Quick-test panel only when a model is `ready`. vLLM provides no clean
 download/compile percentage, so the UI shows an indeterminate state plus the live
 log tail.
+
+**Cache-aware labeling.** If a model's weights are already in the HF cache
+(`is_cached(hf_id)`), a launch never shows `downloading` — it goes straight to
+`loading`. (vLLM's *weight-loading* progress bar prints a `%` bar that would
+otherwise be misread as a download.) Re-running a model you've used before loads
+from disk; it does **not** re-download.
 
 ---
 
@@ -216,14 +226,21 @@ set). JSON unless noted.
 
 | Method · Path | Body | Returns |
 |---|---|---|
-| `POST /api/analyze` | `{hf_id}` | `{exists, hf_id, pipeline_tag, multimodal, is_llm, gated, hf_token_present, params, dtype, size_gb, need_gb, available_gb, total_gb, fits}` or `{exists:false, error}` |
+| `POST /api/analyze` | `{hf_id}` | `{exists, hf_id, pipeline_tag, multimodal, is_llm, gated, hf_token_present, params, dtype, max_ctx, size_gb, need_gb, available_gb, total_gb, fits}` or `{exists:false, error}` |
+
+### Cache (already-downloaded models)
+
+| Method · Path | Body | Returns |
+|---|---|---|
+| `GET /api/cache` | — | `{models:[{hf_id, size_gb, multimodal, arch}], hf_home, total_gb}` — runnable LLMs already on disk in the HF cache (filtered: causal-LM / vision-LM only; ASR/TTS/embeddings/tokenizers excluded). The UI's **Downloaded models** list. |
+| `POST /api/cache/delete` | `{hf_id}` | `{ok:true}` — delete a model's weights from the cache to free disk. `404` if not present. |
 
 ### Models
 
 | Method · Path | Body / params | Returns / notes |
 |---|---|---|
 | `GET /api/models` | — | `{models:[<view>…]}` (see view shape below) |
-| `POST /api/models` | `{hf_id, served_name?, port?, params?, run=true, force=false}` | `201 <view>`. `400` invalid/missing; `409 {message, analysis}` if it won't fit and `force` is false; `503` engine unavailable |
+| `POST /api/models` | `{hf_id, served_name?, port?, params?, run=true, force=false}` | `201 <view>`. `400` invalid id / **already running** (a model is launched once per hf_id); `409 {message, analysis}` if it won't fit and `force` is false; `503` engine unavailable. Allocation is lock-guarded so concurrent duplicate submits can't both create an entry. |
 | `POST /api/models/{id}/start` | — | (re)launch a stopped entry → `<view>` |
 | `POST /api/models/{id}/stop` | — | stop (container `rm -f` / process kill) → `<view>` |
 | `DELETE /api/models/{id}` | — | stop + remove the entry (keeps weights) → `{ok:true}` |
@@ -331,6 +348,17 @@ intent + chosen settings.
 Delete this file to reset the dashboard's model list (running containers are
 re-discovered via their `miniclosedai.*` labels on next start). Downloaded weights
 in `HF_HOME` are never touched.
+
+### Model weight cache & reuse
+
+Weights live in `HF_HOME` (`~/.cache/huggingface`), bind-mounted into every
+container. A model is downloaded **once**; re-running it (or running it on a
+different port) loads from disk — it never re-downloads. The dashboard's
+**Downloaded models** list (`GET /api/cache`) scans the cache and shows the
+runnable LLMs already present, with a one-click **Run** (loads from cache) and a
+**Free** action (`POST /api/cache/delete`, deletes weights to reclaim disk).
+`is_cached(hf_id)` is also what keeps a cached re-run from being mislabeled
+"downloading" (see §5).
 
 ---
 
