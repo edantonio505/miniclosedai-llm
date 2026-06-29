@@ -35,6 +35,7 @@ configuration, and operations.
 17. [Troubleshooting](#17-troubleshooting)
 18. [Hardware notes (unified memory / GB10)](#18-hardware-notes-unified-memory--gb10)
 19. [Known limitations & design decisions](#19-known-limitations--design-decisions)
+20. [Command-line interface (`mc`)](#20-command-line-interface-mc)
 
 ---
 
@@ -550,3 +551,50 @@ unified LPDDR memory. Points specific to such hardware:
   optional shared Bearer token.
 - **Discrete-GPU fit estimates are coarse** (uses system RAM, not VRAM). The real
   constraint there is VRAM; rely on the VRAM table and OOM feedback.
+
+---
+
+## 20. Command-line interface (`mc`)
+
+`cli.py` (run via the `mc` wrapper) is a terminal client for the dashboard — the
+same operations as the GUI, scriptable. It is a **thin HTTP client over the `/api`
+endpoints** (§6), so CLI and GUI share the one `Manager` and stay in live sync. It
+imports **nothing** beyond the standard library (`argparse`, `urllib`, `json`), so
+it runs under any `python3` with no venv — and never duplicates `model_manager`
+logic.
+
+**Config** (env, or read from `.env`): `MANAGER_URL` (default
+`http://localhost:$MANAGER_PORT`, 8099), `MANAGER_API_KEY` (sent as
+`Authorization: Bearer …` when set), `VLLM_API_KEY` (used by `mc chat` when the
+served model enforces a key).
+
+**Commands → endpoint:**
+
+| Command | Endpoint | Notes |
+|---|---|---|
+| `mc info` | `GET /api/health` + `/api/gpu` | engine, GPU, dashboard URL |
+| `mc gpu [--json]` | `GET /api/gpu` | |
+| `mc ls` / `list [--json]` | `GET /api/models` | table; forgiving id matching |
+| `mc analyze <hf_id> [--json]` | `POST /api/analyze` | size / gated / fits |
+| `mc run <hf_id> [flags] [--wait]` | `POST /api/models` | flags → `served_name/port/params/force`; `--wait` polls status |
+| `mc start <id> [--wait]` | `POST /api/models/{id}/start` | re-run an existing stopped model |
+| `mc stop <id>` | `POST /api/models/{id}/stop` | |
+| `mc rm <id>` | `DELETE /api/models/{id}` | keeps weights |
+| `mc status <id> [--json]` | `GET /api/models/{id}/status` | |
+| `mc logs <id> [-f]` | `GET /api/models/{id}/logs` (SSE) | snapshot (bounded) or follow |
+| `mc test <id> [prompt] [--image P] [--max-tokens N]` | `POST /api/models/{id}/test` | one-shot |
+| `mc chat <id> [--temperature --max-tokens]` | model's `…/v1/chat/completions` | REPL, streamed, multi-turn history; `/reset`, `/exit` |
+| `mc url <id>` | `GET /api/models` view | base_url + alt |
+| `mc cache [--json]` / `cache rm <hf_id>` | `GET /api/cache` / `POST /api/cache/delete` | |
+| `mc free <hf_id>` | `POST /api/cache/delete` | |
+| `mc serve` | execs `./dev.sh` | start the dashboard |
+
+`mc chat` is the only command that bypasses the API — it streams from the model's
+own OpenAI endpoint (`http://localhost:<port>/v1/chat/completions`, port read from
+the `GET /api/models` view) to keep full conversation history client-side, matching
+how miniclosedai itself calls models.
+
+**Exit codes:** `0` success · `1` operation error (HTTP 4xx/5xx, surfaced verbatim —
+e.g. doesn't-fit, "already running") · `2` dashboard unreachable / usage error.
+
+**Install:** symlink onto `PATH` if desired — `ln -s "$PWD/mc" ~/.local/bin/mc`.

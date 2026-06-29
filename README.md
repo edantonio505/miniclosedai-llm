@@ -14,6 +14,9 @@ conventions.
 
 - **Web GUI control plane** — a FastAPI dashboard (`./dev.sh`, port **8099**) that
   downloads, launches, monitors, and tests models for you.
+- **Terminal CLI (`mc`)** — everything the GUI does, from the shell
+  (`./mc run …`, `mc ls`, `mc chat …`). Shares the dashboard's backend, so CLI and
+  browser stay in live sync. → see **[Command-line interface](#command-line-interface-mc)**.
 - **Two launch engines, auto-detected** — **Docker** (`vllm/vllm-openai`) on a
   normal GPU server, **native** (`vllm serve` subprocess) on RunPod pods with no
   Docker daemon.
@@ -32,6 +35,7 @@ internals, schemas) see **[DOCUMENTATION.md](DOCUMENTATION.md)**.
 
 - [Quick start (Web GUI)](#quick-start-web-gui)
 - [Using the dashboard](#using-the-dashboard)
+- [Command-line interface (`mc`)](#command-line-interface-mc)
 - [Launch engines (Docker vs native)](#launch-engines-docker-vs-native)
 - [Register a model in miniclosedai](#register-a-model-in-miniclosedai)
 - [Network access (LAN / RunPod)](#network-access-lan--runpod)
@@ -84,6 +88,52 @@ work runs inside the model it launches.
 | **Logs** | Live stream (SSE) of image pull + vLLM startup, so you can see exactly where a slow or failing load is. |
 | **Quick test** | Sends a chat to the running model and shows the reply + latency. For vision models, **+ Attach image** adds an image part (defaults to the bundled test image). |
 | **Register box** | The exact `base_url` to paste into miniclosedai, plus a `host.docker.internal` alternative for same-host Docker. |
+
+---
+
+## Command-line interface (`mc`)
+
+`mc` is a terminal client for the dashboard — the same actions as the GUI, scriptable
+from the shell. It's a thin HTTP client over the `/api` endpoints, so the CLI and
+browser share one backend (run a model in the terminal → it shows in the GUI, and
+vice-versa). **No dependencies** — pure standard library, runs under any `python3`.
+
+The dashboard must be running (`./dev.sh`, or `./mc serve` to start it). Then:
+
+```bash
+./mc info                                   # engine + GPU + dashboard URL
+./mc analyze Qwen/Qwen2.5-7B-Instruct       # type, size, gated, does-it-fit
+./mc run Qwen/Qwen2.5-7B-Instruct --wait    # download + run, poll until ready
+./mc ls                                     # list models (status · port · hf_id)
+./mc test qwen2-5-7b "Capital of France?"   # one-shot prompt
+./mc chat qwen2-5-7b                         # interactive REPL (multi-turn, streamed)
+./mc logs qwen2-5-7b -f                      # follow live logs (Ctrl-C to stop)
+./mc url qwen2-5-7b                          # base_url to register in miniclosedai
+./mc cache                                   # already-downloaded models (run loads from disk)
+./mc stop qwen2-5-7b   ./mc rm qwen2-5-7b    # stop / remove
+```
+
+| Command | Does |
+|---|---|
+| `mc info` · `gpu` | engine/GPU/dashboard status |
+| `mc analyze <hf_id>` | inspect a model before downloading (size, gated, fits) |
+| `mc run <hf_id> [--name --port --quant --max-len --gpu-mem --tp --trust-remote-code --force --wait]` | download + run |
+| `mc ls` · `status <id>` | list / one model's status |
+| `mc start <id>` · `stop <id>` · `rm <id>` | lifecycle (start re-runs an existing stopped model) |
+| `mc logs <id> [-f]` | snapshot or follow logs |
+| `mc test <id> [prompt] [--image P]` | one-shot chat/vision test |
+| `mc chat <id>` | interactive REPL — `/reset`, `/exit` |
+| `mc url <id>` | base_url for miniclosedai |
+| `mc cache` · `free <hf_id>` | list cached models / delete weights |
+| `mc serve` | start the dashboard (`./dev.sh`) |
+
+Model ids are forgiving — `mc test llama …` matches `llama-3-1-8b-instruct`. Read
+commands take `--json` for scripting. Configure the target with `MANAGER_URL`
+(default `http://localhost:$MANAGER_PORT`) and `MANAGER_API_KEY` if the dashboard is
+protected. Exit codes: `0` ok, `1` operation error, `2` dashboard unreachable.
+
+> Tip: symlink it into your PATH — `ln -s "$PWD/mc" ~/.local/bin/mc` — then just
+> `mc ls` from anywhere.
 
 ---
 
@@ -322,6 +372,7 @@ the manager sizes `gpu_memory_utilization` from **free** memory, not total.
 | Path | Purpose |
 |---|---|
 | `app.py` | FastAPI control plane (the dashboard backend) |
+| `cli.py` + `mc` | Terminal client (`./mc …`) — stdlib HTTP client over the `/api` endpoints |
 | `model_manager.py` | Engine abstraction, registry, HF analysis, status, base_url |
 | `static/` | Dashboard UI (`index.html`, `style.css`, `app.js`) |
 | `dev.sh` | One-command launcher (venv + preflight + uvicorn) |
