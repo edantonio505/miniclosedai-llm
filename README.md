@@ -16,7 +16,7 @@ conventions.
   downloads, launches, monitors, and tests models for you.
 - **Terminal CLI (`mc`)** — everything the GUI does, from the shell
   (`./mc run …`, `mc ls`, `mc chat …`). Shares the dashboard's backend, so CLI and
-  browser stay in live sync. → see **[Command-line interface](#command-line-interface-mc)**.
+  browser stay in live sync. → see **[Command-line interface](#command-line-interface-mc--local-remote--agent-access)**.
 - **Two launch engines, auto-detected** — **Docker** (`vllm/vllm-openai`) on a
   normal GPU server, **native** (`vllm serve` subprocess) on RunPod pods with no
   Docker daemon.
@@ -35,7 +35,7 @@ internals, schemas) see **[DOCUMENTATION.md](DOCUMENTATION.md)**.
 
 - [Quick start (Web GUI)](#quick-start-web-gui)
 - [Using the dashboard](#using-the-dashboard)
-- [Command-line interface (`mc`)](#command-line-interface-mc)
+- [Command-line interface (`mc`)](#command-line-interface-mc--local-remote--agent-access)
 - [Launch engines (Docker vs native)](#launch-engines-docker-vs-native)
 - [Register a model in miniclosedai](#register-a-model-in-miniclosedai)
 - [Network access (LAN / RunPod)](#network-access-lan--runpod)
@@ -91,7 +91,7 @@ work runs inside the model it launches.
 
 ---
 
-## Command-line interface (`mc`)
+## Command-line interface (`mc`) — local, remote & agent access
 
 `mc` is a terminal client for the dashboard — the same actions as the GUI, scriptable
 from the shell. It's a thin HTTP client over the `/api` endpoints, so the CLI and
@@ -134,6 +134,53 @@ protected. Exit codes: `0` ok, `1` operation error, `2` dashboard unreachable.
 
 > Tip: symlink it into your PATH — `ln -s "$PWD/mc" ~/.local/bin/mc` — then just
 > `mc ls` from anywhere.
+
+### From another machine, or from an LLM agent
+
+Because everything binds `0.0.0.0` and is plain HTTP, a coding/agent LLM (e.g.
+Claude Code) on another host can discover, run, and use models with no GUI. There
+are **two surfaces** an agent drives:
+
+- **Control plane** — `http://<host>:8099/api` (what `mc` wraps): list / analyze /
+  run / stop / inspect models and the download cache.
+- **Inference** — each *running* model's own `http://<host>:<port>/v1`
+  (OpenAI-compatible): once a model is `ready`, chat with it from any OpenAI client.
+
+Everything is configured by **environment variables** (no interactive prompts):
+`MANAGER_URL` (default `http://localhost:$MANAGER_PORT`, point it at the remote
+host), `MANAGER_API_KEY` (if the dashboard is protected), and `VLLM_API_KEY` (if a
+model enforces a key). Typical agent flow:
+
+```bash
+# 1. point at the host and run a model (control plane, via mc)
+export MANAGER_URL=http://192.168.0.110:8099
+./mc analyze Qwen/Qwen2.5-7B-Instruct        # size / gated / fits?
+./mc run Qwen/Qwen2.5-7B-Instruct --wait     # launches, polls to ready
+./mc ls                                       # served-name · status · PORT
+./mc url qwen2-5-7b-instruct                  # the /v1 base_url for this model
+```
+
+```python
+# 2. chat with it (inference) — any OpenAI client, against the model's own /v1.
+#    The served-name IS the OpenAI `model` id; the port comes from `mc ls`/`mc url`.
+from openai import OpenAI
+client = OpenAI(base_url="http://192.168.0.110:8001/v1", api_key="EMPTY")  # or VLLM_API_KEY
+r = client.chat.completions.create(
+    model="qwen2-5-7b-instruct",
+    messages=[{"role": "user", "content": "Summarize this in one line: ..."}])
+print(r.choices[0].message.content)
+```
+
+```bash
+# …or raw HTTP — no SDK needed:
+curl http://192.168.0.110:8001/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"qwen2-5-7b-instruct","messages":[{"role":"user","content":"hello"}]}'
+```
+
+An agent that prefers the terminal end-to-end can skip the SDK entirely:
+`mc chat <id>` (interactive), `mc test <id> "prompt"` (one-shot), `mc cache` /
+`mc analyze` to inspect. For exposing this beyond localhost (firewall ports, auth),
+see [Network access](#network-access-lan--runpod).
 
 ---
 

@@ -211,6 +211,11 @@ from disk; it does **not** re-download.
 
 ## 6. HTTP API reference
 
+This is the **control plane** API — model management (run / stop / inspect / cache).
+**Inference does not happen here**: once a model is `ready`, you chat with it on its
+*own* OpenAI-compatible endpoint at `http://<host>:<port>/v1` (see §11). So an agent
+uses `/api` (or `mc`) to manage models and `:<port>/v1` to talk to them.
+
 Base: `http://<host>:8099`. All endpoints accept an optional
 `Authorization: Bearer <MANAGER_API_KEY>` header (enforced only if that env var is
 set). JSON unless noted.
@@ -598,3 +603,18 @@ how miniclosedai itself calls models.
 e.g. doesn't-fit, "already running") · `2` dashboard unreachable / usage error.
 
 **Install:** symlink onto `PATH` if desired — `ln -s "$PWD/mc" ~/.local/bin/mc`.
+
+### Remote / LLM-agent access
+
+Everything binds `0.0.0.0` and is plain HTTP, so a coding/agent LLM (e.g. Claude
+Code) on another host can drive the project with no GUI, via the **two surfaces**:
+the **control plane** (`http://<host>:8099/api`, wrapped by `mc` — run/manage
+models) and **inference** (each running model's own `http://<host>:<port>/v1`,
+OpenAI-compatible — chat). Point the CLI at a remote host with `MANAGER_URL`
+(default `http://localhost:$MANAGER_PORT`); send `MANAGER_API_KEY` to the control
+plane and `VLLM_API_KEY` to a model when those are set — all via environment, no
+interactive prompts. A typical agent loop: `mc analyze` → `mc run … --wait` →
+`mc ls`/`mc url <id>` to get the port → chat on `:<port>/v1` with any OpenAI client
+(the served-name is the `model` id), or `mc chat`/`mc test` to stay in the terminal.
+The README's [Command-line interface](README.md) section has copy-paste examples;
+firewall/auth notes are in §15 (Security) and §16 (Operations).
