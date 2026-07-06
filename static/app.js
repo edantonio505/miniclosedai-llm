@@ -98,12 +98,13 @@ async function loadBanner() {
     ? "Docker engine" : h.engine === "native" ? "Native (vllm serve)" : h.engine;
   const net = h.dashboard_url
     ? `<span class="gpu-readout">· reachable at ${escapeHtml(h.dashboard_url)}</span>` : "";
+  const gguf = `<span class="gpu-readout">· GGUF/ternary: ${h.llamacpp_ok ? "llama.cpp ready" : "run ./setup_llamacpp.sh"}</span>`;
   el.className = "banner " + cls;
   el.innerHTML =
     `<span class="engine-badge">${escapeHtml(engLabel)}</span>` +
     `<span class="pill">${escapeHtml(msg)}</span>` +
     `<span class="gpu-readout">${escapeHtml(gpuTxt)}</span>` +
-    net +
+    net + gguf +
     (h.runpod ? `<span class="gpu-readout">· RunPod (base URLs use the pod proxy)</span>` : "");
 }
 

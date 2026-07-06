@@ -119,7 +119,7 @@ The dashboard must be running (`./dev.sh`, or `./mc serve` to start it). Then:
 |---|---|
 | `mc info` · `gpu` | engine/GPU/dashboard status |
 | `mc analyze <hf_id>` | inspect a model before downloading (size, gated, fits) |
-| `mc run <hf_id> [--name --port --quant --max-len --gpu-mem --tp --trust-remote-code --force --wait]` | download + run |
+| `mc run <hf_id> [--name --port --quant --max-len --gpu-mem --tp --trust-remote-code --gguf-file --force --wait]` | download + run (auto-picks vLLM or llama.cpp by format) |
 | `mc ls` · `status <id>` | list / one model's status |
 | `mc start <id>` · `stop <id>` · `rm <id>` | lifecycle (start re-runs an existing stopped model) |
 | `mc logs <id> [-f]` | snapshot or follow logs |
