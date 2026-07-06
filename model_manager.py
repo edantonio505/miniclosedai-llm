@@ -435,9 +435,15 @@ def _port_is_free(port: int) -> bool:
 
 
 def _run(argv: list[str], timeout: int = 20) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        argv, capture_output=True, text=True, timeout=timeout, check=False
-    )
+    try:
+        return subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout, check=False
+        )
+    except FileNotFoundError:
+        # Binary not on PATH (e.g. docker/nvidia-smi absent on this host). Return
+        # a synthetic non-zero result so callers degrade gracefully instead of the
+        # whole control plane crashing — engine availability is surfaced elsewhere.
+        return subprocess.CompletedProcess(argv, 127, "", f"{argv[0]}: not found")
 
 
 def probe_models(port: int, timeout: float = 2.0) -> tuple[bool, list[str]]:
