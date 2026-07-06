@@ -232,7 +232,8 @@ async function onAdd(e) {
 // --------------------------------------------------------------------- model cards
 const STATUS_LABEL = {
   stopped: "Stopped", queued: "Queued", pulling: "Pulling image",
-  downloading: "Downloading", loading: "Loading", ready: "Ready", error: "Error",
+  starting: "Starting", downloading: "Downloading", loading: "Loading",
+  ready: "Ready", error: "Error",
 };
 
 function renderCard(m) {

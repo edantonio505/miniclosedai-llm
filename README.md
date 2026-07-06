@@ -216,12 +216,26 @@ miniclosedai and works with `mc`/the GUI exactly like a vLLM model.
 **The `llama-server` binary.** Ternary GGUFs (`Q2_0`, 1.58-bit) need the
 **PrismML-Eng/llama.cpp** fork (upstream can't load them). The engine auto-detects a
 binary in this order: `$LLAMACPP_SERVER_BIN` → the project's `./.llamacpp` build →
-the `bonsai1bit_test` demo build → `PATH`. To build the fork for GGUF/ternary
-support on a fresh box:
+the `bonsai1bit_test` demo build → `PATH`.
+
+**Auto-built on first run.** `./dev.sh` builds the fork for you the first time it
+starts (if no `llama-server` is found and `git` + `cmake` are present) — it runs in
+the **background** so the dashboard and the vLLM path come up immediately, and the
+GGUF engine flips to available when the build finishes (watch
+`.run/llamacpp-build.log`; the banner / `mc info` show its status). So a fresh clone
++ `./dev.sh` is ready for GGUF with no manual step. Set `LLAMACPP_AUTOBUILD=0` to
+skip it, or build it yourself synchronously:
 
 ```bash
 ./setup_llamacpp.sh        # clones PrismML-Eng/llama.cpp (prism), builds llama-server (CUDA)
 ```
+
+The first CUDA build takes ~10–30 min. On **Debian/Ubuntu** (standard GPU boxes and
+RunPod pods) `setup_llamacpp.sh` **auto-installs the build deps** (`git`, `cmake`,
+`ninja-build`, `build-essential`, `libcurl4-openssl-dev`) via `apt-get` — so a fresh
+clone on a CUDA server builds with no manual setup (set `LLAMACPP_INSTALL_DEPS=0` to
+opt out). It uses the CUDA toolkit (`nvcc`) if present and otherwise falls back to a
+CPU build. On non-Debian distros, install those deps yourself first.
 
 `mc info` / the dashboard banner shows whether `llama-server` is available. GGUFs
 download via `llama-server --hf-repo` into `LLAMA_CACHE` (under `HF_HOME`). For a
@@ -374,6 +388,7 @@ All optional; copy `.env.example` → `.env`. (See [DOCUMENTATION.md](DOCUMENTAT
 | `HF_HOME` | `~/.cache/huggingface` | weight cache (set to a volume on RunPod) |
 | `MANAGER_PORT` | `8099` | dashboard port |
 | `LAUNCH_ENGINE` | `auto` | `auto` / `docker` / `native` |
+| `LLAMACPP_AUTOBUILD` | `auto` | `auto`/`1` = `dev.sh` builds the GGUF `llama-server` in the background if missing; `0` = skip |
 | `PUBLIC_HOST` | auto LAN IP | host advertised in the Register box |
 | `MANAGER_API_KEY` | — | optional Bearer token to protect the dashboard/API |
 | `VLLM_IMAGE` | `vllm/vllm-openai:latest` | Docker image tag |

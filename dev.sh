@@ -18,6 +18,46 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 set -a; source ./.env; set +a
 PORT="${MANAGER_PORT:-8099}"
 ENGINE="${LAUNCH_ENGINE:-auto}"
+AUTOBUILD="${LLAMACPP_AUTOBUILD:-auto}"   # auto|1 = build GGUF engine if missing; 0 = skip
+
+# --- GGUF/ternary engine (llama.cpp) helpers ----------------------------------
+# True if a llama-server binary is already resolvable (mirrors model_manager's
+# llamacpp_bin(): $LLAMACPP_SERVER_BIN → the ./setup_llamacpp.sh build → PATH).
+llamacpp_bin_present() {
+  { [ -n "${LLAMACPP_SERVER_BIN:-}" ] && [ -x "${LLAMACPP_SERVER_BIN:-}" ]; } && return 0
+  [ -x .llamacpp/llama.cpp/build/bin/llama-server ] && return 0
+  command -v llama-server >/dev/null 2>&1 && return 0
+  return 1
+}
+
+# Kick off ./setup_llamacpp.sh in the BACKGROUND if the binary is missing, so the
+# GGUF path becomes ready without a manual step — but the dashboard (and the vLLM
+# path) come up immediately rather than waiting out a 10–30 min first CUDA build.
+# Idempotent (skips if built or already building), and never fails startup.
+maybe_build_llamacpp() {
+  [ "$AUTOBUILD" = 0 ] && return 0
+  if llamacpp_bin_present; then
+    echo "  llama.cpp     : OK (GGUF/ternary engine present)"
+    return 0
+  fi
+  mkdir -p .run
+  local pidf=".run/llamacpp-build.pid" log=".run/llamacpp-build.log"
+  if [ -f "$pidf" ] && kill -0 "$(cat "$pidf" 2>/dev/null)" 2>/dev/null; then
+    echo "  llama.cpp     : build already running (tail -f $log)"
+    return 0
+  fi
+  # Buildable if the toolchain is already here, OR apt-get can install it
+  # (setup_llamacpp.sh best-effort installs the deps on Debian/Ubuntu).
+  if { command -v git >/dev/null 2>&1 && command -v cmake >/dev/null 2>&1; } \
+     || command -v apt-get >/dev/null 2>&1; then :; else
+    echo "  llama.cpp     : GGUF engine absent; needs git + cmake (no apt-get to auto-install) — run ./setup_llamacpp.sh"
+    return 0
+  fi
+  echo "  llama.cpp     : building GGUF/ternary engine in background -> $log"
+  echo "                  (dashboard starts now; GGUF becomes available when the build finishes)"
+  nohup ./setup_llamacpp.sh >"$log" 2>&1 &
+  echo $! >"$pidf"
+}
 
 # --- python env ---------------------------------------------------------------
 PY="${PYTHON:-python3}"
@@ -59,6 +99,7 @@ case "$ENGINE" in
 esac
 echo "  engine        : $SEL  (LAUNCH_ENGINE=$ENGINE)"
 [ "$SEL" = "none" ] && echo "  WARNING: no usable launch engine — install Docker, or 'pip install vllm' for native."
+maybe_build_llamacpp
 echo "==================================================="
 echo
 echo ">> control plane on http://0.0.0.0:${PORT}  (open it in a browser)"

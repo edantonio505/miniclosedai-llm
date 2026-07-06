@@ -242,10 +242,10 @@ details.advanced[open] > summary::before { content: "▾ "; }
 .status-stopped    { background: var(--border); color: var(--text-muted); }
 .status-ready      { background: var(--ok-soft); color: var(--ok); }
 .status-error      { background: var(--danger-soft); color: var(--danger); }
-.status-pulling, .status-downloading, .status-loading, .status-queued {
+.status-pulling, .status-starting, .status-downloading, .status-loading, .status-queued {
   background: var(--warn-soft); color: var(--warn);
 }
-.status-pulling .led, .status-downloading .led, .status-loading .led, .status-queued .led {
+.status-pulling .led, .status-starting .led, .status-downloading .led, .status-loading .led, .status-queued .led {
   animation: led-pulse 1s ease-in-out infinite;
 }
 @keyframes led-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }

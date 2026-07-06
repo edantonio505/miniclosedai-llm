@@ -29,7 +29,21 @@ ARCH="${LLAMACPP_CUDA_ARCH:-80;86;89;90;100;120a}"
 c() { printf '\033[1;34m>> %s\033[0m\n' "$1"; }
 
 # --- preflight -------------------------------------------------------------------
-for t in git cmake; do command -v "$t" >/dev/null || { echo "ERROR: '$t' not found."; exit 1; }; done
+# Best-effort install of the build toolchain on Debian/Ubuntu (standard Ubuntu GPU
+# boxes and RunPod pods), so a fresh `git clone` + build "just works". Skipped when
+# the deps are already present, apt-get is absent (non-Debian), or LLAMACPP_INSTALL_DEPS=0.
+_have_curl_dev() { [ -f /usr/include/curl/curl.h ] || pkg-config --exists libcurl 2>/dev/null; }
+if [ "${LLAMACPP_INSTALL_DEPS:-1}" != 0 ] \
+   && { ! command -v git >/dev/null || ! command -v cmake >/dev/null || ! _have_curl_dev; } \
+   && command -v apt-get >/dev/null 2>&1; then
+  SUDO=""; [ "$(id -u)" = 0 ] || SUDO="sudo"
+  c "installing build deps (git cmake ninja-build build-essential libcurl4-openssl-dev)"
+  DEBIAN_FRONTEND=noninteractive $SUDO apt-get update -qq || true
+  DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y --no-install-recommends \
+    git cmake ninja-build build-essential libcurl4-openssl-dev || \
+    echo "WARN: apt-get install failed — install the build deps manually and re-run."
+fi
+for t in git cmake; do command -v "$t" >/dev/null || { echo "ERROR: '$t' not found (install it and re-run)."; exit 1; }; done
 GEN=(); command -v ninja >/dev/null && GEN=(-G Ninja)
 
 # Resolve a REAL nvcc. `/usr/bin/nvcc` is often a stale distro stub (e.g. CUDA 12);

@@ -1060,7 +1060,13 @@ class Manager:
         eng = self._engine_for(e)
         ok, msg = eng.available()
         if not ok:
-            raise RuntimeError(f"launch engine '{eng.name}' unavailable: {msg}")
+            # Record the reason on the entry (and stop desiring it) so the card
+            # shows a clear error instead of hanging on "starting"/"pulling"
+            # forever — e.g. a GGUF model launched before ./setup_llamacpp.sh.
+            e.error = f"launch engine '{eng.name}' unavailable: {msg}"
+            e.desired_state = "stopped"
+            self.save()
+            raise RuntimeError(e.error)
         e.error = ""
         try:
             eng.launch(e)
@@ -1139,12 +1145,15 @@ class Manager:
             return {"status": "error", "ready": False,
                     "detail": (eng.recent_logs(e, 40) or e.error or "exited")}
 
-        # absent: either mid-launch (pulling image) or genuinely stopped.
+        # absent: either mid-launch or genuinely stopped.
         if e.desired_state == "running":
             logs = eng.recent_logs(e, 100)
             if self._scan_error(logs) or e.error:
                 return {"status": "error", "ready": False, "detail": logs or e.error}
-            return {"status": "pulling", "ready": False, "detail": ""}
+            # "pulling" (a Docker image pull) only applies to the docker engine;
+            # native/llama.cpp just spawn a process, so label that phase "starting".
+            phase = "pulling" if eng.name == "docker" else "starting"
+            return {"status": phase, "ready": False, "detail": ""}
         if e.error:
             return {"status": "error", "ready": False, "detail": e.error[-1200:]}
         return {"status": "stopped", "ready": False, "detail": ""}

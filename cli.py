@@ -86,7 +86,8 @@ def c(text, color):
 
 
 STATUS_COLOR = {"ready": "green", "error": "red", "stopped": "dim",
-                "pulling": "yellow", "downloading": "yellow", "loading": "yellow"}
+                "pulling": "yellow", "starting": "yellow",
+                "downloading": "yellow", "loading": "yellow"}
 
 
 # --------------------------------------------------------------------- HTTP
