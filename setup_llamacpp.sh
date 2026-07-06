@@ -23,10 +23,31 @@ DIR=".llamacpp"
 SRC="$DIR/llama.cpp"
 BUILD="$SRC/build"
 CUDA="${LLAMACPP_CUDA:-1}"
-# Broad arch list incl. Blackwell (120a) — matches the known-good build on this box.
-ARCH="${LLAMACPP_CUDA_ARCH:-80;86;89;90;100;120a}"
 
 c() { printf '\033[1;34m>> %s\033[0m\n' "$1"; }
+
+# CUDA arch(es) to compile for. We build ON the box we serve on, so by default we
+# target exactly this machine's GPU(s) — auto-detected from nvidia-smi. This is what
+# makes `git clone` + build "just work" on any CUDA server: no hardcoded arch list to
+# go stale or exceed an older toolkit (e.g. sm_100/120a need CUDA ≥12.8). Override
+# with LLAMACPP_CUDA_ARCH (e.g. "120a" for GB10, or a ";"-separated list for a binary
+# you'll move between different GPUs). Falls back to a broad pre-Blackwell list if
+# detection fails (works on any CUDA ≥11.8 toolkit).
+_detect_cuda_arch() {
+  command -v nvidia-smi >/dev/null 2>&1 || return 1
+  nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null \
+    | tr -d ' .' | grep -E '^[0-9]+$' | sort -u | paste -sd';' -
+}
+ARCH="${LLAMACPP_CUDA_ARCH:-}"
+if [ "$CUDA" = 1 ] && [ -z "$ARCH" ]; then
+  ARCH="$(_detect_cuda_arch || true)"
+  if [ -n "$ARCH" ]; then
+    c "auto-detected CUDA arch from GPU: $ARCH  (override with LLAMACPP_CUDA_ARCH)"
+  else
+    ARCH="80;86;89;90"
+    c "could not detect GPU arch — falling back to $ARCH"
+  fi
+fi
 
 # --- preflight -------------------------------------------------------------------
 # Best-effort install of the build toolchain on Debian/Ubuntu (standard Ubuntu GPU
