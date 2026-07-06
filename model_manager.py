@@ -107,6 +107,38 @@ def llama_cache() -> str:
     return _env("LLAMA_CACHE") or os.path.join(hf_home(), "llama.cpp")
 
 
+def llamacpp_build_status() -> dict:
+    """Is a background llama-server build in progress? (dev.sh's auto-build and
+    ./setup_llamacpp.sh log to .run/llamacpp-build.log and write a .pid.) Returns
+    {building, progress} so the banner can show 'building llama.cpp… N/M' instead
+    of a bare 'run ./setup_llamacpp.sh' while the GGUF engine is being compiled."""
+    log = RUN_DIR / "llamacpp-build.log"
+    pidf = RUN_DIR / "llamacpp-build.pid"
+    building = False
+    try:
+        os.kill(int(pidf.read_text().strip()), 0)  # signal 0 = liveness check
+        building = True
+    except (OSError, ValueError):
+        # No/dead pid file — fall back to "log written to in the last 20s", which
+        # also covers a manual ./setup_llamacpp.sh run that wrote no pid.
+        try:
+            building = log.exists() and (time.time() - log.stat().st_mtime) < 20
+        except OSError:
+            building = False
+    if not building:
+        return {"building": False, "progress": ""}
+    progress = ""
+    try:
+        for line in reversed(log.read_text(errors="replace").splitlines()[-60:]):
+            m = re.search(r"\[(\d+)/(\d+)\]", line)  # ninja "[step/total]"
+            if m:
+                progress = f"{m.group(1)}/{m.group(2)}"
+                break
+    except OSError:
+        pass
+    return {"building": True, "progress": progress}
+
+
 def lan_ip() -> str:
     """Best-effort primary LAN IP (the address other machines reach us on).
 
@@ -836,6 +868,9 @@ class Manager:
         d_ok, d_msg = self.docker.available()
         n_ok, n_msg = self.native.available()
         l_ok, l_msg = self.llamacpp.available()
+        build = llamacpp_build_status()
+        if not l_ok and build["building"]:
+            l_msg = f"building llama.cpp… {build['progress']}".rstrip()
         gpu = self.gpu_info()
         return {
             "engine": self.engine.name,
@@ -843,6 +878,7 @@ class Manager:
             "docker_ok": d_ok, "docker_msg": d_msg,
             "native_ok": n_ok, "native_msg": n_msg,
             "llamacpp_ok": l_ok, "llamacpp_msg": l_msg,
+            "llamacpp_building": build["building"], "llamacpp_progress": build["progress"],
             "gpu_ok": bool(gpu.get("gpus")),
             "image": vllm_image(),
             "hf_home": hf_home(),

@@ -53,15 +53,18 @@ fi
 # Best-effort install of the build toolchain on Debian/Ubuntu (standard Ubuntu GPU
 # boxes and RunPod pods), so a fresh `git clone` + build "just works". Skipped when
 # the deps are already present, apt-get is absent (non-Debian), or LLAMACPP_INSTALL_DEPS=0.
+# libssl-dev is required for HTTPS: llama-server downloads GGUFs via --hf-repo over
+# https, and without OpenSSL dev headers the build has no TLS ("HTTPS is not supported").
 _have_curl_dev() { [ -f /usr/include/curl/curl.h ] || pkg-config --exists libcurl 2>/dev/null; }
+_have_ssl_dev()  { [ -f /usr/include/openssl/ssl.h ] || pkg-config --exists openssl 2>/dev/null; }
 if [ "${LLAMACPP_INSTALL_DEPS:-1}" != 0 ] \
-   && { ! command -v git >/dev/null || ! command -v cmake >/dev/null || ! _have_curl_dev; } \
+   && { ! command -v git >/dev/null || ! command -v cmake >/dev/null || ! _have_curl_dev || ! _have_ssl_dev; } \
    && command -v apt-get >/dev/null 2>&1; then
   SUDO=""; [ "$(id -u)" = 0 ] || SUDO="sudo"
-  c "installing build deps (git cmake ninja-build build-essential libcurl4-openssl-dev)"
+  c "installing build deps (git cmake ninja-build build-essential libcurl4-openssl-dev libssl-dev)"
   DEBIAN_FRONTEND=noninteractive $SUDO apt-get update -qq || true
   DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y --no-install-recommends \
-    git cmake ninja-build build-essential libcurl4-openssl-dev || \
+    git cmake ninja-build build-essential libcurl4-openssl-dev libssl-dev || \
     echo "WARN: apt-get install failed — install the build deps manually and re-run."
 fi
 for t in git cmake; do command -v "$t" >/dev/null || { echo "ERROR: '$t' not found (install it and re-run)."; exit 1; }; done

@@ -119,7 +119,10 @@ async function loadBanner() {
     ? "Docker engine" : h.engine === "native" ? "Native (vllm serve)" : h.engine;
   const net = h.dashboard_url
     ? `<span class="gpu-readout">· reachable at ${escapeHtml(h.dashboard_url)}</span>` : "";
-  const gguf = `<span class="gpu-readout">· GGUF/ternary: ${h.llamacpp_ok ? "llama.cpp ready" : "run ./setup_llamacpp.sh"}</span>`;
+  const ggufTxt = h.llamacpp_ok ? "llama.cpp ready"
+    : h.llamacpp_building ? `building llama.cpp… ${h.llamacpp_progress || ""}`.trim()
+    : "run ./setup_llamacpp.sh";
+  const gguf = `<span class="gpu-readout${h.llamacpp_building ? " building" : ""}">· GGUF/ternary: ${escapeHtml(ggufTxt)}</span>`;
   el.className = "banner " + cls;
   el.innerHTML =
     `<span class="engine-badge">${escapeHtml(engLabel)}</span>` +

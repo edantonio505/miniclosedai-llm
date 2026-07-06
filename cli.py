@@ -211,7 +211,12 @@ def cmd_info(args):
     print(f"{c('engine', 'dim')}     {eng}  ({'GPU ok' if h.get('gpu_ok') else c('no GPU', 'yellow')})")
     print(f"{c('dashboard', 'dim')}  {h.get('dashboard_url')}")
     print(f"{c('hf_home', 'dim')}    {h.get('hf_home')}")
-    gg = c("ready", "green") if h.get("llamacpp_ok") else c("run ./setup_llamacpp.sh", "yellow")
+    if h.get("llamacpp_ok"):
+        gg = c("ready", "green")
+    elif h.get("llamacpp_building"):
+        gg = c(f"building… {h.get('llamacpp_progress', '')}".rstrip(), "yellow")
+    else:
+        gg = c("run ./setup_llamacpp.sh", "yellow")
     print(f"{c('gguf', 'dim')}       llama.cpp (ternary/GGUF): {gg}")
     if h.get("no_engine"):
         print(c("  no launch engine available — install Docker or `pip install vllm`", "red"))
