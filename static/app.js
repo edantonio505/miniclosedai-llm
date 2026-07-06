@@ -37,6 +37,27 @@ function toast(msg, kind = "") {
   toastTimer = setTimeout(() => { el.hidden = true; }, 4000);
 }
 
+// Clipboard with a fallback: navigator.clipboard only exists on HTTPS/localhost,
+// so over http://<LAN-IP> we fall back to a temporary textarea + execCommand.
+function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text);
+  }
+  return new Promise((resolve, reject) => {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.focus(); ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      ok ? resolve() : reject(new Error("copy failed"));
+    } catch (e) { reject(e); }
+  });
+}
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -300,9 +321,9 @@ function wireCard(st, m) {
 
   $(".act-copy", n).addEventListener("click", () => {
     const url = $(".base-url", n).textContent;
-    navigator.clipboard.writeText(url).then(
+    copyText(url).then(
       () => toast("Copied base URL", "ok"),
-      () => toast("Copy failed", "error"));
+      () => toast("Copy failed — select the URL and copy manually", "error"));
   });
 
   // quick test — text by default; image optional (multimodal only)
