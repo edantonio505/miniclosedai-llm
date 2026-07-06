@@ -18,3 +18,6 @@ models.local.json
 
 # runtime logs
 *.log
+
+# llama.cpp build (from setup_llamacpp.sh)
+.llamacpp/

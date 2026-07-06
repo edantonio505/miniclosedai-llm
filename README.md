@@ -17,9 +17,11 @@ conventions.
 - **Terminal CLI (`mc`)** — everything the GUI does, from the shell
   (`./mc run …`, `mc ls`, `mc chat …`). Shares the dashboard's backend, so CLI and
   browser stay in live sync. → see **[Command-line interface](#command-line-interface-mc--local-remote--agent-access)**.
-- **Two launch engines, auto-detected** — **Docker** (`vllm/vllm-openai`) on a
-  normal GPU server, **native** (`vllm serve` subprocess) on RunPod pods with no
-  Docker daemon.
+- **Format-aware serving, auto-detected** — safetensors models run on **vLLM**
+  (**Docker** `vllm/vllm-openai`, or **native** `vllm serve` on RunPod pods with no
+  Docker daemon); **GGUF** models — including **ternary Bonsai** — run on
+  **llama.cpp** (`llama-server`). You just paste the repo. → see
+  **[Serving engines](#serving-engines)**.
 - **Config-file workflow** — for reproducible, version-controlled fleets, drive
   everything from [`models.yaml`](models.yaml) via `docker compose` / launch
   scripts.
@@ -36,7 +38,7 @@ internals, schemas) see **[DOCUMENTATION.md](DOCUMENTATION.md)**.
 - [Quick start (Web GUI)](#quick-start-web-gui)
 - [Using the dashboard](#using-the-dashboard)
 - [Command-line interface (`mc`)](#command-line-interface-mc--local-remote--agent-access)
-- [Launch engines (Docker vs native)](#launch-engines-docker-vs-native)
+- [Serving engines (vLLM & llama.cpp/GGUF)](#serving-engines)
 - [Register a model in miniclosedai](#register-a-model-in-miniclosedai)
 - [Network access (LAN / RunPod)](#network-access-lan--runpod)
 - [Config-file workflow (compose + scripts)](#config-file-workflow-compose--scripts)
@@ -117,7 +119,7 @@ The dashboard must be running (`./dev.sh`, or `./mc serve` to start it). Then:
 |---|---|
 | `mc info` · `gpu` | engine/GPU/dashboard status |
 | `mc analyze <hf_id>` | inspect a model before downloading (size, gated, fits) |
-| `mc run <hf_id> [--name --port --quant --max-len --gpu-mem --tp --trust-remote-code --force --wait]` | download + run |
+| `mc run <hf_id> [--name --port --quant --max-len --gpu-mem --tp --trust-remote-code --gguf-file --force --wait]` | download + run (auto-picks vLLM or llama.cpp by format) |
 | `mc ls` · `status <id>` | list / one model's status |
 | `mc start <id>` · `stop <id>` · `rm <id>` | lifecycle (start re-runs an existing stopped model) |
 | `mc logs <id> [-f]` | snapshot or follow logs |
@@ -184,18 +186,46 @@ see [Network access](#network-access-lan--runpod).
 
 ---
 
-## Launch engines (Docker vs native)
+## Serving engines
 
-The manager auto-detects how to run models. Override with `LAUNCH_ENGINE` in `.env`.
+A model's **format** picks the engine automatically — you don't choose:
 
-| Engine | Selected when | How it runs a model |
+| Format | Engine | How it runs |
 |---|---|---|
-| **Docker** (default on a server) | the docker daemon is reachable | `docker run` one `vllm/vllm-openai` container per model, GPU passed through, weights bind-mounted from `HF_HOME` |
-| **Native** | Docker unusable (e.g. a RunPod pod) and `vllm` is importable | `vllm serve` as a subprocess, logs to `.run/<name>.log` |
+| **safetensors** (most HF models) | **vLLM** | `docker run vllm/vllm-openai` (server) or `vllm serve` (native) |
+| **GGUF** (ternary Bonsai, any `*-GGUF` repo) | **llama.cpp** | `llama-server` as a subprocess |
 
-`LAUNCH_ENGINE=auto` (default) → Docker if available, else native. Set `docker` or
-`native` to force one. Both engines build the **same** `vllm serve` flags from
-`_args.build_args`, so behavior is identical either way.
+For the vLLM path, the manager auto-detects Docker vs native (override with
+`LAUNCH_ENGINE=docker|native`): **Docker** (`vllm/vllm-openai` container, default on
+a server) or **native** (`vllm serve` subprocess, e.g. on a RunPod pod). GGUF repos
+are routed to **llama.cpp** regardless — see below.
+
+### GGUF & ternary models (Bonsai) — `llama.cpp`
+
+Paste any **GGUF** repo (e.g. PrismML's ternary Bonsai:
+`prism-ml/Ternary-Bonsai-1.7B-gguf`, `-4B-gguf`, `-8B-gguf`) and it's auto-detected
+and served by **`llama-server`** — which is OpenAI-compatible, so it registers in
+miniclosedai and works with `mc`/the GUI exactly like a vLLM model.
+
+```bash
+./mc analyze prism-ml/Ternary-Bonsai-4B-gguf   # -> "GGUF → llama.cpp", picks the Q2_0 file
+./mc run     prism-ml/Ternary-Bonsai-4B-gguf --wait
+./mc chat    ternary-bonsai-4b-gguf
+```
+
+**The `llama-server` binary.** Ternary GGUFs (`Q2_0`, 1.58-bit) need the
+**PrismML-Eng/llama.cpp** fork (upstream can't load them). The engine auto-detects a
+binary in this order: `$LLAMACPP_SERVER_BIN` → the project's `./.llamacpp` build →
+the `bonsai1bit_test` demo build → `PATH`. To build the fork for GGUF/ternary
+support on a fresh box:
+
+```bash
+./setup_llamacpp.sh        # clones PrismML-Eng/llama.cpp (prism), builds llama-server (CUDA)
+```
+
+`mc info` / the dashboard banner shows whether `llama-server` is available. GGUFs
+download via `llama-server --hf-repo` into `LLAMA_CACHE` (under `HF_HOME`). For a
+multi-file GGUF repo, override the picked file with `mc run … --gguf-file NAME`.
 
 ---
 
@@ -322,6 +352,7 @@ Two harnesses (standard-library only):
   ./dev.sh                                   # dashboard must be running
   python3 e2e_test.py --quick                # tiny text models only (fast)
   python3 e2e_test.py                        # + a small vision model
+  python3 e2e_test.py --gguf                  # ternary Bonsai (needs ./setup_llamacpp.sh)
   python3 e2e_test.py --models Qwen/Qwen2.5-1.5B-Instruct
   python3 e2e_test.py --base http://192.168.0.110:8099 --timeout 1200
   ```
@@ -420,8 +451,9 @@ the manager sizes `gpu_memory_utilization` from **free** memory, not total.
 |---|---|
 | `app.py` | FastAPI control plane (the dashboard backend) |
 | `cli.py` + `mc` | Terminal client (`./mc …`) — stdlib HTTP client over the `/api` endpoints |
-| `model_manager.py` | Engine abstraction, registry, HF analysis, status, base_url |
+| `model_manager.py` | Engine abstraction (vLLM + llama.cpp), registry, HF analysis, status |
 | `static/` | Dashboard UI (`index.html`, `style.css`, `app.js`) |
+| `setup_llamacpp.sh` | Builds the PrismML llama.cpp fork (GGUF/ternary support) |
 | `dev.sh` | One-command launcher (venv + preflight + uvicorn) |
 | `manager-requirements.txt` | Dashboard deps (no torch/vLLM) |
 | `Dockerfile.manager` | Optional: run the control plane itself in a container |

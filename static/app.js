@@ -37,6 +37,27 @@ function toast(msg, kind = "") {
   toastTimer = setTimeout(() => { el.hidden = true; }, 4000);
 }
 
+// Clipboard with a fallback: navigator.clipboard only exists on HTTPS/localhost,
+// so over http://<LAN-IP> we fall back to a temporary textarea + execCommand.
+function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text);
+  }
+  return new Promise((resolve, reject) => {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.focus(); ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      ok ? resolve() : reject(new Error("copy failed"));
+    } catch (e) { reject(e); }
+  });
+}
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -98,12 +119,13 @@ async function loadBanner() {
     ? "Docker engine" : h.engine === "native" ? "Native (vllm serve)" : h.engine;
   const net = h.dashboard_url
     ? `<span class="gpu-readout">· reachable at ${escapeHtml(h.dashboard_url)}</span>` : "";
+  const gguf = `<span class="gpu-readout">· GGUF/ternary: ${h.llamacpp_ok ? "llama.cpp ready" : "run ./setup_llamacpp.sh"}</span>`;
   el.className = "banner " + cls;
   el.innerHTML =
     `<span class="engine-badge">${escapeHtml(engLabel)}</span>` +
     `<span class="pill">${escapeHtml(msg)}</span>` +
     `<span class="gpu-readout">${escapeHtml(gpuTxt)}</span>` +
-    net +
+    net + gguf +
     (h.runpod ? `<span class="gpu-readout">· RunPod (base URLs use the pod proxy)</span>` : "");
 }
 
@@ -159,7 +181,7 @@ async function onAnalyze() {
       (a.need_gb ? `Might not fit (~${a.need_gb} GB needed, ${a.available_gb} GB free)` : "Size unknown");
     out.className = "analyze-result " + cls;
     out.innerHTML =
-      `<div class="a-title">${escapeHtml(a.hf_id)}<span class="type-pill">${a.multimodal ? "vision" : "text"}</span></div>` +
+      `<div class="a-title">${escapeHtml(a.hf_id)}<span class="type-pill">${a.fmt === "gguf" ? "gguf · llama.cpp" : (a.multimodal ? "vision" : "text")}</span></div>` +
       `<div class="a-grid">${fmtAnalysis(a)}</div>` +
       `<div class="a-actions"><button id="analyze-run" class="btn btn-small btn-primary">${a.fits ? "Download & Run" : "Run anyway"}</button></div>`;
     $("#analyze-run").addEventListener("click", () => doAdd(hf, !a.fits));
@@ -227,7 +249,8 @@ function renderCard(m) {
   const srcPill = $(".source-pill", n);
   srcPill.hidden = m.source !== "preset";
   srcPill.textContent = "preset";
-  $(".model-sub", n).textContent = `${m.hf_id} · :${m.port}`;
+  $(".model-sub", n).textContent = `${m.hf_id} · :${m.port}`
+    + (m.fmt === "gguf" ? " · GGUF (llama.cpp)" : "");
 
   const pill = $(".status-pill", n);
   pill.className = "status-pill status-" + m.status;
@@ -298,9 +321,9 @@ function wireCard(st, m) {
 
   $(".act-copy", n).addEventListener("click", () => {
     const url = $(".base-url", n).textContent;
-    navigator.clipboard.writeText(url).then(
+    copyText(url).then(
       () => toast("Copied base URL", "ok"),
-      () => toast("Copy failed", "error"));
+      () => toast("Copy failed — select the URL and copy manually", "error"));
   });
 
   // quick test — text by default; image optional (multimodal only)
