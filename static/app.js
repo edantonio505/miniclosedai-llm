@@ -159,7 +159,7 @@ async function onAnalyze() {
       (a.need_gb ? `Might not fit (~${a.need_gb} GB needed, ${a.available_gb} GB free)` : "Size unknown");
     out.className = "analyze-result " + cls;
     out.innerHTML =
-      `<div class="a-title">${escapeHtml(a.hf_id)}<span class="type-pill">${a.multimodal ? "vision" : "text"}</span></div>` +
+      `<div class="a-title">${escapeHtml(a.hf_id)}<span class="type-pill">${a.fmt === "gguf" ? "gguf · llama.cpp" : (a.multimodal ? "vision" : "text")}</span></div>` +
       `<div class="a-grid">${fmtAnalysis(a)}</div>` +
       `<div class="a-actions"><button id="analyze-run" class="btn btn-small btn-primary">${a.fits ? "Download & Run" : "Run anyway"}</button></div>`;
     $("#analyze-run").addEventListener("click", () => doAdd(hf, !a.fits));
@@ -227,7 +227,8 @@ function renderCard(m) {
   const srcPill = $(".source-pill", n);
   srcPill.hidden = m.source !== "preset";
   srcPill.textContent = "preset";
-  $(".model-sub", n).textContent = `${m.hf_id} · :${m.port}`;
+  $(".model-sub", n).textContent = `${m.hf_id} · :${m.port}`
+    + (m.fmt === "gguf" ? " · GGUF (llama.cpp)" : "");
 
   const pill = $(".status-pill", n);
   pill.className = "status-pill status-" + m.status;

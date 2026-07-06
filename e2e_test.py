@@ -46,6 +46,11 @@ QUICK = [
 DEFAULT = QUICK + [
     {"hf_id": "Qwen/Qwen2.5-VL-3B-Instruct", "kind": "vision", "expect": "blue"},
 ]
+# Ternary GGUF (llama.cpp path) — opt-in via --gguf, since it needs the PrismML
+# llama.cpp fork built (./setup_llamacpp.sh). The smallest ternary Bonsai.
+GGUF = [
+    {"hf_id": "prism-ml/Ternary-Bonsai-1.7B-gguf", "kind": "text", "expect": "paris"},
+]
 
 
 # --------------------------------------------------------------------- HTTP helpers
@@ -183,13 +188,16 @@ def main():
     ap.add_argument("--base", default="http://localhost:8099")
     ap.add_argument("--timeout", type=int, default=900, help="per-model ready timeout (s)")
     ap.add_argument("--models", nargs="+", help="HF ids to test (override defaults)")
-    ap.add_argument("--quick", action="store_true", help="only the tiny text model")
+    ap.add_argument("--quick", action="store_true", help="only the tiny text models")
+    ap.add_argument("--gguf", action="store_true", help="ternary GGUF (llama.cpp) model — needs ./setup_llamacpp.sh")
     ap.add_argument("--keep", action="store_true", help="don't stop/remove after testing")
     args = ap.parse_args()
 
     base = args.base.rstrip("/")
     if args.models:
         specs = [{"hf_id": h, "kind": "text", "expect": None} for h in args.models]
+    elif args.gguf:
+        specs = GGUF
     elif args.quick:
         specs = QUICK
     else:

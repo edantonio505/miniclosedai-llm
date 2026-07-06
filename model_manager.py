@@ -69,6 +69,44 @@ def vllm_image() -> str:
     return _env("VLLM_IMAGE", defaults.get("image", "vllm/vllm-openai:latest"))
 
 
+# ---- llama.cpp (GGUF / ternary Bonsai) --------------------------------------
+# Known locations to auto-discover a `llama-server` binary. The project's own
+# build (from ./setup_llamacpp.sh, the PrismML prism fork with ternary Q2_0
+# support) is preferred; the bonsai1bit_test demo build is an older fallback that
+# handles 1-bit Bonsai but NOT current ternary GGUFs.
+_LLAMACPP_KNOWN = [
+    ROOT / ".llamacpp/llama.cpp/build/bin/llama-server",
+    Path.home() / "Desktop/bonsai1bit_test/Bonsai-demo/llama.cpp/build-cuda/bin/llama-server",
+    Path.home() / "Desktop/bonsai1bit_test/Bonsai-demo/bin/cuda/llama-server",
+]
+
+
+def llamacpp_bin() -> str | None:
+    """Resolve a llama-server binary: $LLAMACPP_SERVER_BIN → known builds → PATH."""
+    env = _env("LLAMACPP_SERVER_BIN")
+    if env and Path(env).exists():
+        return env
+    for p in _LLAMACPP_KNOWN:
+        if p.exists():
+            return str(p)
+    return shutil.which("llama-server")
+
+
+def llamacpp_lib_dir() -> str:
+    """Dir for LD_LIBRARY_PATH (bundled .so's live next to the binary by default)."""
+    d = _env("LLAMACPP_LIB_DIR")
+    if d:
+        return d
+    b = llamacpp_bin()
+    return str(Path(b).resolve().parent) if b else ""
+
+
+def llama_cache() -> str:
+    """Where llama-server caches downloaded GGUFs. Kept under HF_HOME so the
+    dashboard's cache library can see them alongside HF-cached models."""
+    return _env("LLAMA_CACHE") or os.path.join(hf_home(), "llama.cpp")
+
+
 def lan_ip() -> str:
     """Best-effort primary LAN IP (the address other machines reach us on).
 
@@ -182,12 +220,16 @@ def is_cached(hf_id: str) -> bool:
     except ValueError:
         return False
     snaps = Path(hf_home()) / "hub" / ("models--" + hf_id.replace("/", "--")) / "snapshots"
-    if not snaps.is_dir():
-        return False
-    for snap in snaps.iterdir():
-        for ext in ("*.safetensors", "*.bin", "*.gguf", "*.pt"):
-            if any(snap.glob(ext)):
-                return True
+    if snaps.is_dir():
+        for snap in snaps.iterdir():
+            for ext in ("*.safetensors", "*.bin", "*.gguf", "*.pt"):
+                if any(snap.glob(ext)):
+                    return True
+    # GGUF downloaded by llama-server lives flat in LLAMA_CACHE as
+    # "<repo with / → _>_<file>.gguf".
+    lc = Path(llama_cache())
+    if lc.is_dir() and any(lc.glob(f"{hf_id.replace('/', '_')}_*.gguf")):
+        return True
     return False
 
 
@@ -234,19 +276,50 @@ def _bytes_per_param(dtype: str | None, tags: list[str]) -> float:
     return 2.0  # BF16 / F16 default
 
 
-def _tree_weight_gb(hf_id: str) -> float | None:
-    """Sum weight-file sizes from the repo tree (fallback when no safetensors meta)."""
+def _repo_tree(hf_id: str) -> list[tuple[str, int]]:
+    """Return [(path, size_bytes)] for a repo, from the HF tree API."""
     tree = _hf_get(f"https://huggingface.co/api/models/{hf_id}/tree/main?recursive=true")
     if not isinstance(tree, list):
-        return None
-    exts = (".safetensors", ".bin", ".pt", ".pth", ".gguf")
-    total = 0
+        return []
+    out = []
     for e in tree:
-        path = e.get("path", "")
-        if path.endswith(exts):
-            size = (e.get("lfs") or {}).get("size") or e.get("size") or 0
-            total += int(size)
+        p = e.get("path", "")
+        s = (e.get("lfs") or {}).get("size") or e.get("size") or 0
+        out.append((p, int(s or 0)))
+    return out
+
+
+def _tree_weight_gb(hf_id: str) -> float | None:
+    """Sum weight-file sizes from the repo tree (fallback when no safetensors meta)."""
+    exts = (".safetensors", ".bin", ".pt", ".pth", ".gguf")
+    total = sum(s for p, s in _repo_tree(hf_id) if p.endswith(exts))
     return total / 1e9 if total else None
+
+
+def pick_gguf(files: list[tuple[str, int]]) -> tuple[str, int] | None:
+    """Choose which GGUF file to serve from a repo's [(path,size)] list.
+
+    Prefers a low-bit quant over full precision; for a repo with several quants
+    it favors the canonical ternary/1-bit or a sensible general default. Users can
+    override with an explicit file. Returns (basename, size_bytes) or None.
+    """
+    ggufs = [(p.rsplit("/", 1)[-1], s) for p, s in files if p.lower().endswith(".gguf")]
+    if not ggufs:
+        return None
+    if len(ggufs) == 1:
+        return ggufs[0]
+    full = ("f16.gguf", "f32.gguf", "bf16.gguf")
+    pool = [(n, s) for n, s in ggufs if not any(n.lower().endswith(x) for x in full)] or ggufs
+    # preference by exact suffix, most-specific first (ternary Q2_0, then common quants)
+    prefs = ("-q2_0.gguf", "-q1_0.gguf", ".q4_k_m.gguf", "-q4_k_m.gguf",
+             "q4_k_m.gguf", "q4_0.gguf", "q5_k_m.gguf", "q6_k.gguf", "q8_0.gguf")
+    for pref in prefs:
+        cands = sorted((c for c in pool if c[0].lower().endswith(pref)),
+                       key=lambda c: (len(c[0]), c[0]))
+        if cands:
+            return cands[0]
+    # fallback: smallest, then shortest name
+    return sorted(pool, key=lambda c: (c[1], len(c[0])))[0]
 
 
 def analyze_model(hf_id: str) -> dict:
@@ -269,13 +342,24 @@ def analyze_model(hf_id: str) -> dict:
     tags = [str(t) for t in (info.get("tags") or [])]
     gated = bool(info.get("gated"))
 
-    # size: prefer the safetensors param count (exact), else sum weight files.
+    # GGUF detection: a repo with .gguf files and no safetensors → serve via
+    # llama.cpp (covers ternary Bonsai and any other GGUF). vLLM can't load these.
+    tree = _repo_tree(hf_id)
+    has_safetensors = any(p.endswith(".safetensors") for p, _ in tree)
+    gguf = pick_gguf(tree)
+    is_gguf = bool(gguf) and not has_safetensors
+    gguf_file = gguf[0] if is_gguf else None
+
+    # size: GGUF → the chosen file; else safetensors param count; else tree sum.
     st = info.get("safetensors") or {}
     params = st.get("total")
     dtype = None
     if isinstance(st.get("parameters"), dict) and st["parameters"]:
         dtype = max(st["parameters"], key=st["parameters"].get)
-    if params:
+    if is_gguf:
+        size_gb = gguf[1] / 1e9
+        dtype = "GGUF"
+    elif params:
         size_gb = params * _bytes_per_param(dtype, tags) / 1e9
     else:
         size_gb = _tree_weight_gb(hf_id)
@@ -303,8 +387,11 @@ def analyze_model(hf_id: str) -> dict:
     return {
         "exists": True, "hf_id": hf_id,
         "pipeline_tag": pipeline, "multimodal": multimodal,
-        "is_llm": text_gen, "gated": gated, "hf_token_present": token_present,
+        "is_llm": text_gen or is_gguf, "gated": gated, "hf_token_present": token_present,
         "params": params, "dtype": dtype, "max_ctx": max_ctx,
+        "fmt": "gguf" if is_gguf else "safetensors",
+        "engine_hint": "llamacpp" if is_gguf else None,
+        "gguf_file": gguf_file,
         "size_gb": round(size_gb, 1) if size_gb else None,
         "need_gb": need_gb, "available_gb": mem["available_gb"],
         "total_gb": mem["total_gb"], "fits": fits,
@@ -379,6 +466,8 @@ class ModelEntry:
     engine: str = ""                 # which engine last launched it
     multimodal: bool = True          # accepts images (gates the vision test panel)
     size_gb: float = 0.0             # reported weight footprint (for display)
+    fmt: str = "safetensors"         # "safetensors" (vLLM) | "gguf" (llama.cpp)
+    gguf_file: str = ""              # for gguf: which file in the repo to serve
     error: str = ""
     created_at: str = ""
 
@@ -388,6 +477,7 @@ class ModelEntry:
             "port": self.port, "source": self.source, "params": self.params,
             "desired_state": self.desired_state, "engine": self.engine,
             "multimodal": self.multimodal, "size_gb": self.size_gb,
+            "fmt": self.fmt, "gguf_file": self.gguf_file,
             "created_at": self.created_at,
         }
 
@@ -400,7 +490,8 @@ class ModelEntry:
             port=int(d["port"]), source=d.get("source", "custom"), params=params,
             desired_state=d.get("desired_state", "stopped"),
             engine=d.get("engine", ""), multimodal=d.get("multimodal", True),
-            size_gb=d.get("size_gb", 0.0), created_at=d.get("created_at", ""),
+            size_gb=d.get("size_gb", 0.0), fmt=d.get("fmt", "safetensors"),
+            gguf_file=d.get("gguf_file", ""), created_at=d.get("created_at", ""),
         )
 
 
@@ -585,7 +676,8 @@ class NativeEngine(Engine):
             start_new_session=True, env=env,  # own process group → killpg later
         )
         self._meta(e).write_text(json.dumps(
-            {"pid": proc.pid, "port": e.port, "served": e.served_name, "hf_id": e.hf_id}
+            {"pid": proc.pid, "port": e.port, "served": e.served_name,
+             "hf_id": e.hf_id, "engine": self.name}
         ))
 
     def _pid(self, e: ModelEntry) -> int | None:
@@ -654,8 +746,59 @@ class NativeEngine(Engine):
                 continue
             if d.get("pid") and self._alive_pid(int(d["pid"])):
                 out.append({"served": d.get("served", meta.stem),
-                            "port": int(d.get("port", 0)), "hf_id": d.get("hf_id", "")})
+                            "port": int(d.get("port", 0)), "hf_id": d.get("hf_id", ""),
+                            "engine": d.get("engine", self.name)})
         return out
+
+
+class LlamaCppEngine(NativeEngine):
+    """Serve GGUF models (ternary Bonsai etc.) via a native `llama-server`.
+
+    Inherits NativeEngine's pid-file/log/state/stop machinery; only the launch
+    command differs. llama-server is OpenAI-compatible (`/v1/models` +
+    `/v1/chat/completions`), so readiness probing, base_url, and the whole
+    register-in-miniclosedai flow work unchanged.
+    """
+    name = "llamacpp"
+
+    def available(self) -> tuple[bool, str]:
+        b = llamacpp_bin()
+        if b:
+            return True, f"llama-server: {b}"
+        return False, "llama-server not found — run ./setup_llamacpp.sh (ternary needs the PrismML fork)"
+
+    def launch(self, e: ModelEntry) -> None:
+        RUN_DIR.mkdir(exist_ok=True)
+        binp = llamacpp_bin()
+        if not binp:
+            raise RuntimeError("no llama-server binary; run ./setup_llamacpp.sh")
+        cmd = [binp, "--hf-repo", e.hf_id]
+        if e.gguf_file:
+            cmd += ["--hf-file", e.gguf_file]
+        cmd += ["--host", "0.0.0.0", "--port", str(e.port), "-ngl", "99", "-c", "0",
+                "--jinja"]
+        key = _env("VLLM_API_KEY")
+        if key:
+            cmd += ["--api-key", key]
+        cmd += list(e.params.get("extra_args") or [])
+
+        env = dict(os.environ)
+        lib = llamacpp_lib_dir()
+        if lib:  # bundled .so's next to the binary
+            env["LD_LIBRARY_PATH"] = lib + (":" + env["LD_LIBRARY_PATH"] if env.get("LD_LIBRARY_PATH") else "")
+        env["LLAMA_CACHE"] = llama_cache()
+        os.makedirs(env["LLAMA_CACHE"], exist_ok=True)
+        token = _env("HF_TOKEN")
+        if token:
+            env["HF_TOKEN"] = token
+            env["HUGGING_FACE_HUB_TOKEN"] = token
+
+        logf = self._log(e).open("wb")
+        proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT,
+                                start_new_session=True, env=env)
+        self._meta(e).write_text(json.dumps(
+            {"pid": proc.pid, "port": e.port, "served": e.served_name,
+             "hf_id": e.hf_id, "engine": self.name}))
 
 
 # --------------------------------------------------------------------------- manager
@@ -664,6 +807,7 @@ class Manager:
         self.entries: dict[str, ModelEntry] = {}
         self.docker = DockerEngine()
         self.native = NativeEngine()
+        self.llamacpp = LlamaCppEngine()   # GGUF / ternary Bonsai
         self.engine = self._select_engine()
         self._add_lock = threading.Lock()  # serialize add() so concurrent
         # duplicate submits can't both create an entry (the "-2" duplicate bug)
@@ -685,12 +829,14 @@ class Manager:
     def engine_info(self) -> dict:
         d_ok, d_msg = self.docker.available()
         n_ok, n_msg = self.native.available()
+        l_ok, l_msg = self.llamacpp.available()
         gpu = self.gpu_info()
         return {
             "engine": self.engine.name,
             "engine_override": _env("LAUNCH_ENGINE", "auto"),
             "docker_ok": d_ok, "docker_msg": d_msg,
             "native_ok": n_ok, "native_msg": n_msg,
+            "llamacpp_ok": l_ok, "llamacpp_msg": l_msg,
             "gpu_ok": bool(gpu.get("gpus")),
             "image": vllm_image(),
             "hf_home": hf_home(),
@@ -777,14 +923,19 @@ class Manager:
         # or its launch died with a prior manager) is reset to stopped — otherwise
         # it would be stuck showing "pulling"/"loading" forever. We don't
         # auto-relaunch; the user clicks Run again.
-        live = {d["served"]: d for d in self.engine.discover()}
+        # Discover across ALL engines (docker containers + native/llamacpp procs);
+        # native.discover() already covers llamacpp (same .run/*.json, tagged by
+        # engine), so docker + native is the full set.
+        live = {}
+        for d in self.docker.discover() + self.native.discover():
+            live.setdefault(d["served"], d)
         for e in self.entries.values():
             if e.served_name in live:
+                d = live[e.served_name]
                 e.desired_state = "running"
-                e.engine = self.engine.name
-                lp = live[e.served_name].get("port")
-                if lp:
-                    e.port = lp
+                e.engine = d.get("engine") or e.engine or self.engine.name
+                if d.get("port"):
+                    e.port = d["port"]
             elif e.desired_state == "running":
                 e.desired_state = "stopped"
         # Live instances with no registry entry → synthesize a card so the user
@@ -795,7 +946,9 @@ class Manager:
                     id=served, hf_id=d.get("hf_id", "") or "(unknown)",
                     served_name=served, port=d.get("port") or 0,
                     source="custom", desired_state="running",
-                    engine=self.engine.name, created_at=_now())
+                    engine=d.get("engine") or self.engine.name,
+                    fmt="gguf" if d.get("engine") == "llamacpp" else "safetensors",
+                    created_at=_now())
         self.save()
 
     # ---- allocation -------------------------------------------------------
@@ -832,30 +985,34 @@ class Manager:
             err.analysis = report  # type: ignore[attr-defined]
             raise err
 
+        # GGUF → llama.cpp engine; everything else → vLLM (docker/native).
+        is_gguf = report.get("fmt") == "gguf"
+        engine_name = "llamacpp" if is_gguf else self.engine.name
+        gguf_file = report.get("gguf_file") if is_gguf else ""
+        if (params or {}).get("gguf_file"):
+            gguf_file = params["gguf_file"]
+
         merged = dict(PARAM_DEFAULTS)
         merged.update(params or {})
-
-        # Cap max_model_len to the model's native context — asking vLLM for more
-        # than the model supports aborts startup (e.g. SmolLM2 is 8192, not 16384).
-        if not (params or {}).get("max_model_len") and report.get("max_ctx"):
-            merged["max_model_len"] = min(int(merged["max_model_len"]), int(report["max_ctx"]))
-
-        # Size gpu_memory_util from FREE memory, not total. On unified-memory
-        # parts (GB10) the OS/desktop already holds a chunk, so a fraction of
-        # TOTAL (the default 0.9) can exceed what's actually free and vLLM aborts.
-        # Target ~85% of free → leaves headroom; user override always wins.
-        if not (params or {}).get("gpu_memory_util") and report.get("total_gb"):
-            avail, total = report["available_gb"], report["total_gb"]
-            merged["gpu_memory_util"] = max(0.30, round(min(0.90, avail * 0.85 / total), 2))
-
+        merged.pop("gguf_file", None)  # not a vLLM/serving param
         multimodal = bool(report.get("multimodal"))
-        # Text-only LLMs must NOT get image flags; clear the image-related params
-        # unless the caller explicitly set them.
-        if not multimodal:
-            if not (params or {}).get("max_images"):
-                merged["max_images"] = None
-            merged.setdefault("mm_processor_kwargs", None)
-        _validate_params(merged)
+
+        if not is_gguf:
+            # --- vLLM-only param massaging (skipped for GGUF/llama.cpp) ---
+            # Cap max_model_len to the model's native context — asking vLLM for
+            # more than the model supports aborts startup (SmolLM2 is 8192).
+            if not (params or {}).get("max_model_len") and report.get("max_ctx"):
+                merged["max_model_len"] = min(int(merged["max_model_len"]), int(report["max_ctx"]))
+            # Size gpu_memory_util from FREE memory, not total (GB10 unified mem).
+            if not (params or {}).get("gpu_memory_util") and report.get("total_gb"):
+                avail, total = report["available_gb"], report["total_gb"]
+                merged["gpu_memory_util"] = max(0.30, round(min(0.90, avail * 0.85 / total), 2))
+            # Text-only LLMs must NOT get image flags.
+            if not multimodal:
+                if not (params or {}).get("max_images"):
+                    merged["max_images"] = None
+                merged.setdefault("mm_processor_kwargs", None)
+            _validate_params(merged)
 
         # Critical section: reject a duplicate of an already-active model and
         # allocate name/port atomically, so two near-simultaneous submits (a
@@ -876,9 +1033,10 @@ class Manager:
             # Mark running up-front (when launching) so a concurrent submit sees
             # it as active and is rejected by the dup check above.
             e = ModelEntry(id=served, hf_id=hf_id, served_name=served, port=port,
-                           source="custom", params=merged,
+                           source="custom", params=merged, engine=engine_name,
                            desired_state="running" if run else "stopped",
                            multimodal=multimodal, size_gb=report.get("size_gb") or 0.0,
+                           fmt=report.get("fmt", "safetensors"), gguf_file=gguf_file or "",
                            created_at=_now())
             self.entries[e.id] = e
             self.save()
@@ -893,14 +1051,15 @@ class Manager:
 
     def start(self, mid: str) -> ModelEntry:
         e = self.get(mid)
-        ok, msg = self.engine.available()
+        eng = self._engine_for(e)
+        ok, msg = eng.available()
         if not ok:
-            raise RuntimeError(f"launch engine '{self.engine.name}' unavailable: {msg}")
+            raise RuntimeError(f"launch engine '{eng.name}' unavailable: {msg}")
         e.error = ""
         try:
-            self.engine.launch(e)
+            eng.launch(e)
             e.desired_state = "running"
-            e.engine = self.engine.name
+            e.engine = eng.name
         except Exception as exc:
             e.error = str(exc)[-2000:]
             e.desired_state = "stopped"
@@ -911,9 +1070,7 @@ class Manager:
 
     def stop(self, mid: str) -> ModelEntry:
         e = self.get(mid)
-        eng = self.docker if e.engine == "docker" else \
-            self.native if e.engine == "native" else self.engine
-        eng.stop(e)
+        self._engine_for(e).stop(e)
         e.desired_state = "stopped"
         self.save()
         return e
@@ -933,6 +1090,8 @@ class Manager:
             return self.docker
         if e.engine == "native":
             return self.native
+        if e.engine == "llamacpp":
+            return self.llamacpp
         return self.engine
 
     @staticmethod
@@ -941,7 +1100,10 @@ class Manager:
         markers = ("out of memory", "manager-error", "no matching manifest",
                    "401 client error", "403 client error", "gatedrepoerror",
                    "repositorynotfounderror", "traceback (most recent call last)",
-                   "error response from daemon")
+                   "error response from daemon",
+                   # llama.cpp / GGUF failures
+                   "invalid ggml type", "failed to load model", "unknown model architecture",
+                   "failed to read tensor", "error: failed to download")
         return next((m for m in markers if m in low), None)
 
     def derive_status(self, e: ModelEntry) -> dict:

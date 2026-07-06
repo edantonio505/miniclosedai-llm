@@ -245,7 +245,7 @@ def cmd_ls(args):
     rows = []
     for m in sorted(models, key=lambda x: (x["source"] != "custom", x["id"])):
         st = c(m["status"], STATUS_COLOR.get(m["status"], "dim"))
-        kind = "vision" if m.get("multimodal") else "text"
+        kind = "gguf" if m.get("fmt") == "gguf" else ("vision" if m.get("multimodal") else "text")
         rows.append([m["id"], st, f":{m['port']}", kind, m["hf_id"]])
     _table(rows, ["NAME", "STATUS", "PORT", "KIND", "HF_ID"])
 
@@ -259,6 +259,8 @@ def cmd_analyze(args):
         die(a.get("error", "not found"))
     typ = "vision+text" if a["multimodal"] else "text"
     print(f"{c(a['hf_id'], 'bold')}  ({typ})")
+    if a.get("fmt") == "gguf":
+        print(f"  format     GGUF → llama.cpp" + (f"  ·  {a['gguf_file']}" if a.get("gguf_file") else ""))
     if a.get("params"):
         print(f"  params     {a['params']/1e9:.1f} B" + (f" · {a['dtype']}" if a.get('dtype') else ""))
     if a.get("size_gb") is not None:
@@ -281,6 +283,7 @@ def _run_params(args) -> dict:
     if args.max_images is not None: p["max_images"] = args.max_images
     if args.quant: p["quantization"] = args.quant
     if args.trust_remote_code: p["trust_remote_code"] = True
+    if getattr(args, "gguf_file", None): p["gguf_file"] = args.gguf_file
     return p
 
 
@@ -546,6 +549,7 @@ def build_parser():
     s.add_argument("--tp", type=int, help="tensor parallel size (#GPUs)")
     s.add_argument("--max-images", type=int, dest="max_images")
     s.add_argument("--trust-remote-code", action="store_true")
+    s.add_argument("--gguf-file", dest="gguf_file", help="for a multi-file GGUF repo, pick the file")
     s.add_argument("--force", action="store_true", help="launch even if it may not fit")
     s.add_argument("--wait", action="store_true", help="poll until ready")
     s.add_argument("--timeout", type=int, default=1200)

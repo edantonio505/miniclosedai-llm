@@ -143,10 +143,13 @@ is **not** in the inference path except for the Quick-test proxy.
 
 ## 4. Launch engines
 
-`model_manager.Engine` is an interface with two implementations. Selection
-(`select_engine`): `LAUNCH_ENGINE=docker|native` forces one; `auto` (default) picks
-Docker when `docker info` succeeds, else native when `vllm` is importable, else a
-degraded "no engine" state surfaced in `/api/health`.
+`model_manager.Engine` is an interface with three implementations. **Engine choice
+is per-model, by format:** GGUF repos → `LlamaCppEngine`; everything else → vLLM via
+`DockerEngine`/`NativeEngine`. `analyze_model` sets `fmt` + `engine_hint`; `add()`
+records `ModelEntry.engine`; `start`/`stop`/`_engine_for`/`reconcile` dispatch on it.
+For the **vLLM** pair, `select_engine` (`LAUNCH_ENGINE=docker|native`, `auto`
+default) picks Docker when `docker info` succeeds, else native when `vllm` is
+importable, else a degraded "no engine" state in `/api/health`.
 
 ### DockerEngine
 
@@ -169,8 +172,24 @@ degraded "no engine" state surfaced in `/api/health`.
 - **State** via `pid` liveness. **Logs** by tailing the file. **Stop**
   `SIGTERM→SIGKILL` the process group. **Discover** scans `.run/*.json`.
 
-Both build their vLLM flags from `_args.build_args`, so a model's behavior is
-engine-independent.
+The two vLLM engines build their flags from `_args.build_args`, so a model's
+behavior is engine-independent.
+
+### LlamaCppEngine (GGUF / ternary Bonsai)
+
+Subclasses `NativeEngine` (same pid-file/log/state/stop machinery); only the launch
+command differs:
+`llama-server --hf-repo <id> --hf-file <gguf> --host 0.0.0.0 --port <p> -ngl 99 -c 0
+--jinja`, with `LD_LIBRARY_PATH`=the binary's dir and `LLAMA_CACHE` under `HF_HOME`.
+`llama-server` is **OpenAI-compatible** (`/v1/models` + `/v1/chat/completions`), so
+readiness probing, `base_url`, `view`, and the register-in-miniclosedai flow are
+unchanged. **Binary resolution** (`llamacpp_bin`): `$LLAMACPP_SERVER_BIN` →
+`./.llamacpp` build → `bonsai1bit_test` build → `PATH`. **Ternary `Q2_0` (1.58-bit)
+needs the PrismML-Eng/llama.cpp fork** — build it with `./setup_llamacpp.sh` (upstream
+and older builds reject the newer GGUF tensor types). `analyze_model` detects GGUF
+(`.gguf` files, no safetensors) and `pick_gguf` chooses the file (prefers a low-bit
+quant; override with `--gguf-file` / a param). GGUFs download into `LLAMA_CACHE`;
+`is_cached` also checks there so re-runs show `loading`, not `downloading`.
 
 ### Startup reconcile
 
@@ -406,7 +425,10 @@ reads it via `docker compose`.
 | `MANAGER_API_KEY` | — | dashboard | If set, all API calls require a matching Bearer token |
 | `RUNPOD_POD_ID` | (set by RunPod) | dashboard | Switches `base_url` to the pod proxy form |
 | `VLLM_IMAGE` | `vllm/vllm-openai:latest` | both | Docker image tag |
-| `VLLM_API_KEY` | — | both | If set, vLLM enforces it (`--api-key`); enter the same value in miniclosedai |
+| `VLLM_API_KEY` | — | both | If set, vLLM enforces it (`--api-key`); also passed to llama-server; enter the same value in miniclosedai |
+| `LLAMACPP_SERVER_BIN` | auto-detect | dashboard | Path to `llama-server` (GGUF). Auto: `./.llamacpp` → `bonsai1bit_test` → `PATH` |
+| `LLAMACPP_LIB_DIR` | binary's dir | dashboard | `LD_LIBRARY_PATH` for the llama-server's bundled `.so`s |
+| `LLAMA_CACHE` | `$HF_HOME/llama.cpp` | dashboard | Where llama-server caches downloaded GGUFs |
 | `SHIM_*` | see `shim/server.py` | shim | Shim model id / served name / port / dtype / max images / api key |
 
 ---
