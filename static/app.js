@@ -239,11 +239,21 @@ const STATUS_LABEL = {
   ready: "Ready", error: "Error",
 };
 
+// Show either the network/public base URL or the localhost one, per st.showLocal.
+// Copy reads .base-url's text, so it always copies whichever is currently shown.
+function applyUrlView(st) {
+  const be = $(".base-url", st.node);
+  const useLocal = st.showLocal && be.dataset.local;
+  be.textContent = useLocal ? be.dataset.local : be.dataset.network;
+  const tgl = $(".act-url-toggle", st.node);
+  if (tgl) tgl.textContent = useLocal ? "Use network URL" : "Use localhost";
+}
+
 function renderCard(m) {
   let st = cards.get(m.id);
   if (!st) {
     const node = $("#model-card-tpl").content.firstElementChild.cloneNode(true);
-    st = { node, es: null, file: null, expanded: false };
+    st = { node, es: null, file: null, expanded: false, showLocal: false };
     cards.set(m.id, st);
     wireCard(st, m);
     $("#models-list").appendChild(node);
@@ -265,8 +275,12 @@ function renderCard(m) {
   $(".act-run", n).textContent = m.status === "error" ? "Retry" : "Run";
   $(".act-stop", n).hidden = !active;
 
-  // base_url + test panel only meaningful when ready
-  $(".base-url", n).textContent = m.base_url;
+  // base_url + test panel only meaningful when ready. Stash both the network/public
+  // URL and the localhost one so the toggle can swap between them (see applyUrlView).
+  const be = $(".base-url", n);
+  be.dataset.network = m.base_url;
+  be.dataset.local = (m.local_url || "").replace("127.0.0.1", "localhost");
+  applyUrlView(st);
   const alt = $(".alt-base-url", n);
   if (alt) alt.textContent = m.alt_base_url || "";
   $(".register-block", n).hidden = !m.ready;
@@ -321,6 +335,11 @@ function wireCard(st, m) {
     const lb = $(".logs-block", n);
     if (lb.hidden) { setExpanded(st, true); lb.hidden = false; openLogs(st, id); }
     else { lb.hidden = true; closeLogs(st); }
+  });
+
+  $(".act-url-toggle", n).addEventListener("click", () => {
+    st.showLocal = !st.showLocal;
+    applyUrlView(st);
   });
 
   $(".act-copy", n).addEventListener("click", () => {
