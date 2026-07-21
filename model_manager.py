@@ -320,6 +320,125 @@ def _hf_get(url: str, timeout: float = 12.0):
         return None
 
 
+# ---- Hugging Face token --------------------------------------------------------
+# Gated repos (Llama, Gemma, …) need `HF_TOKEN` in the environment. The user pastes
+# a token in the web UI; `set_hf_token` applies it to THIS process (so the next
+# model launch and every HF API call pick it up via `_env`, no restart) and writes
+# it to ./.env (so it survives a restart — dev.sh does `set -a; source ./.env`).
+ENV_FILE = ROOT / ".env"
+
+
+def _mask_token(tok: str) -> str:
+    """A recognizable preview of a token that never exposes the secret itself."""
+    if not tok:
+        return ""
+    return "****" if len(tok) <= 8 else f"{tok[:3]}…{tok[-4:]}"
+
+
+def _hf_whoami(token: str):
+    """Verify a token via HF's whoami-v2 API. Returns the account dict, or None
+    if the token is invalid OR Hugging Face is unreachable (caller distinguishes)."""
+    headers = {"User-Agent": "miniclosedai-llm", "Authorization": f"Bearer {token}"}
+    try:
+        req = Request("https://huggingface.co/api/whoami-v2", headers=headers, method="GET")
+        with urlopen(req, timeout=12.0) as r:
+            if r.status != 200:
+                return None
+            return json.loads(r.read().decode())
+    except (URLError, OSError, ValueError, TimeoutError):
+        return None
+
+
+def _apply_hf_token_env(token: str) -> None:
+    """Set/clear the token in this process's env under both names HF libraries read,
+    so it takes effect immediately for the next launch without a restart."""
+    for name in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+        if token:
+            os.environ[name] = token
+        else:
+            os.environ.pop(name, None)
+
+
+def _persist_env_var(key: str, value: str) -> None:
+    """Upsert `key=value` in ./.env, preserving other lines and comments."""
+    lines = ENV_FILE.read_text().splitlines() if ENV_FILE.exists() else []
+    for i, ln in enumerate(lines):
+        stripped = ln.lstrip()
+        if stripped.startswith(key + "=") or stripped.startswith(key + " ="):
+            lines[i] = f"{key}={value}"
+            break
+    else:
+        lines.append(f"{key}={value}")
+    ENV_FILE.write_text("\n".join(lines) + "\n")
+
+
+def hf_token_status() -> dict:
+    """Whether a token is configured, a masked preview, and (if HF is reachable) the
+    account it belongs to. Never returns the token itself."""
+    tok = _env("HF_TOKEN")
+    if not tok:
+        return {"present": False, "masked": "", "user": None, "valid": None}
+    who = _hf_whoami(tok)
+    return {"present": True, "masked": _mask_token(tok),
+            "user": (who or {}).get("name"), "valid": who is not None}
+
+
+def set_hf_token(token: str, persist: bool = True) -> dict:
+    """Apply a pasted HF token to the running manager (so the next model launch and
+    all HF API calls use it) and persist it to ./.env. The token is checked against
+    HF's whoami; a token that can't be verified is still saved (it may just be a
+    transient network issue) but reported as unverified so the UI can warn."""
+    token = (token or "").strip()
+    if not token:
+        return {"ok": False, "error": "Token is empty — paste a token from "
+                                      "huggingface.co/settings/tokens."}
+    who = _hf_whoami(token)  # None = invalid token OR HF unreachable
+    _apply_hf_token_env(token)
+    persisted = False
+    warning = None
+    if persist:
+        try:
+            _persist_env_var("HF_TOKEN", token)
+            persisted = True
+        except OSError as exc:
+            warning = f"Applied for this session but couldn't write .env: {exc}"
+    return {"ok": True, "valid": who is not None, "user": (who or {}).get("name"),
+            "masked": _mask_token(token), "persisted": persisted, "warning": warning}
+
+
+def clear_hf_token() -> None:
+    """Remove the token from this process and from ./.env."""
+    _apply_hf_token_env("")
+    try:
+        _persist_env_var("HF_TOKEN", "")
+    except OSError:
+        pass
+
+
+# Signatures of a gated/authentication failure in a model's logs — a download that
+# died because the HF repo is gated and the token is missing/lacks access. When the
+# UI sees this it surfaces the token input so the user can paste one and retry.
+_GATED_MARKERS = (
+    "gatedrepoerror",
+    "gated repo",
+    "you are trying to access a gated repo",
+    "cannot access gated repo",
+    "is restricted. you must have access",
+    "access to model",  # "Access to model X is restricted"
+)
+
+
+def is_gated_auth_error(text: str | None) -> bool:
+    """True if `text` (a log tail / error string) looks like a gated-repo 401."""
+    if not text:
+        return False
+    low = text.lower()
+    if any(m in low for m in _GATED_MARKERS):
+        return True
+    # A bare 401/403 from huggingface also means "authenticate / request access".
+    return ("401 client error" in low or "403 client error" in low) and "huggingface" in low
+
+
 def _bytes_per_param(dtype: str | None, tags: list[str]) -> float:
     t = " ".join(tags).lower()
     if any(q in t for q in ("4bit", "int4", "awq", "gptq", "-4bit")):
@@ -1252,7 +1371,9 @@ class Manager:
                 return {"status": "ready", "ready": True, "detail": ", ".join(ids)}
             logs = eng.recent_logs(e, 100)
             if self._scan_error(logs):
-                return {"status": "error", "ready": False, "detail": eng.recent_logs(e, 40)}
+                tail = eng.recent_logs(e, 40)
+                return {"status": "error", "ready": False, "detail": tail,
+                        "needs_hf_token": is_gated_auth_error(logs)}
             low = logs.lower()
             # If the weights are already cached, this phase is load/compile, NOT a
             # download — never mislabel it "downloading" (vLLM's weight-loading
@@ -1266,20 +1387,25 @@ class Manager:
 
         if st == "exited":
             # container/process started then died → surface the tail as the error.
-            return {"status": "error", "ready": False,
-                    "detail": (eng.recent_logs(e, 40) or e.error or "exited")}
+            tail = eng.recent_logs(e, 40)
+            detail = tail or e.error or "exited"
+            return {"status": "error", "ready": False, "detail": detail,
+                    "needs_hf_token": is_gated_auth_error(detail)}
 
         # absent: either mid-launch or genuinely stopped.
         if e.desired_state == "running":
             logs = eng.recent_logs(e, 100)
             if self._scan_error(logs) or e.error:
-                return {"status": "error", "ready": False, "detail": logs or e.error}
+                detail = logs or e.error
+                return {"status": "error", "ready": False, "detail": detail,
+                        "needs_hf_token": is_gated_auth_error(detail)}
             # "pulling" (a Docker image pull) only applies to the docker engine;
             # native/llama.cpp just spawn a process, so label that phase "starting".
             phase = "pulling" if eng.name == "docker" else "starting"
             return {"status": phase, "ready": False, "detail": ""}
         if e.error:
-            return {"status": "error", "ready": False, "detail": e.error[-1200:]}
+            return {"status": "error", "ready": False, "detail": e.error[-1200:],
+                    "needs_hf_token": is_gated_auth_error(e.error)}
         return {"status": "stopped", "ready": False, "detail": ""}
 
     def base_url(self, e: ModelEntry, public: bool = True) -> str:
@@ -1310,6 +1436,7 @@ class Manager:
             "status": st["status"],
             "ready": st["ready"],
             "detail": st["detail"],
+            "needs_hf_token": st.get("needs_hf_token", False),
             "error": e.error,
             "base_url": self.base_url(e),
             "alt_base_url": self.alt_base_url(e),

@@ -285,6 +285,63 @@ def cmd_analyze(args):
     print(f"  verdict    {verdict}")
 
 
+def _prompt_and_set_token() -> bool:
+    """Interactively read an HF token and save it via the manager (applied to the
+    running server + persisted to .env). Returns True if a token was set."""
+    import getpass
+    print(c("This is a gated Hugging Face model — it needs an access token.", "yellow"))
+    print("  1. Request access on the model's HF page (must be approved by the owner).")
+    print("  2. Create a READ token at https://huggingface.co/settings/tokens")
+    try:
+        token = getpass.getpass("  Paste HF token (hidden, blank to skip): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    if not token:
+        return False
+    try:
+        r = api_post("/api/hf-token", {"token": token})
+    except ApiError as e:
+        print(c(f"  could not save token: {e}", "red"))
+        return False
+    if r.get("valid") and r.get("user"):
+        print(c(f"  saved — signed in as {r['user']}. Continuing…", "green"))
+    else:
+        print(c("  saved (couldn't verify with HF right now — it'll still be used).", "yellow"))
+    return True
+
+
+def cmd_hf_token(args):
+    require_daemon()
+    if args.action == "clear":
+        api_delete("/api/hf-token")
+        print("cleared HF token")
+        return
+    if args.action == "set":
+        token = args.token
+        if not token:
+            import getpass
+            token = getpass.getpass("Paste HF token (hidden): ").strip()
+        if not token:
+            die("no token provided")
+        r = api_post("/api/hf-token", {"token": token})
+        if r.get("valid") and r.get("user"):
+            print(c(f"saved — signed in as {r['user']} ({r['masked']})", "green"))
+        else:
+            print(c(f"saved ({r['masked']}) — couldn't verify with HF (network?)", "yellow"))
+        return
+    # default: show status
+    s = api_get("/api/hf-token")
+    if not s.get("present"):
+        print("HF token: " + c("not set", "yellow") + " — needed for gated models.")
+        print("  set it with:  " + c("mc hf-token set", "cyan"))
+    elif s.get("user"):
+        print(f"HF token: {c('set', 'green')} — signed in as {s['user']} ({s['masked']})")
+    else:
+        print(f"HF token: {c('set', 'green')} ({s['masked']})"
+              + ("" if s.get("valid") else c(" — unverified", "yellow")))
+
+
 def _run_params(args) -> dict:
     p = {}
     if args.max_len is not None: p["max_model_len"] = args.max_len
@@ -299,6 +356,16 @@ def _run_params(args) -> dict:
 
 def cmd_run(args):
     require_daemon()
+    # Gated model with no token configured? offer to set one before we launch —
+    # otherwise the download fails mid-flight with a 401 GatedRepoError. Only in an
+    # interactive terminal; scripted/CI runs just proceed (and surface the error).
+    if sys.stdin.isatty():
+        try:
+            a = api_post("/api/analyze", {"hf_id": args.hf_id})
+        except (ApiError, Unreachable):
+            a = None
+        if a and a.get("gated") and not a.get("hf_token_present"):
+            _prompt_and_set_token()
     body = {"hf_id": args.hf_id, "run": True, "force": args.force}
     if args.name: body["served_name"] = args.name
     if args.port: body["port"] = args.port
@@ -548,6 +615,11 @@ def build_parser():
 
     s = sub.add_parser("analyze", help="inspect a HF model before downloading")
     s.add_argument("hf_id"); s.add_argument("--json", action="store_true"); s.set_defaults(fn=cmd_analyze)
+
+    s = sub.add_parser("hf-token", help="show / set / clear the Hugging Face access token (gated models)")
+    s.add_argument("action", nargs="?", choices=["show", "set", "clear"], default="show")
+    s.add_argument("--token", help="token value (omit 'set' arg's value for a hidden prompt)")
+    s.set_defaults(fn=cmd_hf_token)
 
     s = sub.add_parser("run", help="download + run a model")
     s.add_argument("hf_id")

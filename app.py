@@ -72,6 +72,10 @@ class AnalyzeRequest(BaseModel):
     hf_id: str
 
 
+class HFTokenRequest(BaseModel):
+    token: str
+
+
 # --------------------------------------------------------------------------- meta
 @app.get("/api/health")
 async def health(_=Depends(_require_auth)):
@@ -90,6 +94,27 @@ async def gpu(_=Depends(_require_auth)):
 @app.post("/api/analyze")
 async def analyze(req: AnalyzeRequest, _=Depends(_require_auth)):
     return await asyncio.to_thread(mm.analyze_model, req.hf_id)
+
+
+@app.get("/api/hf-token")
+async def hf_token_get(_=Depends(_require_auth)):
+    """Is a Hugging Face token configured? (masked — never returns the secret)."""
+    return await asyncio.to_thread(mm.hf_token_status)
+
+
+@app.post("/api/hf-token")
+async def hf_token_set(req: HFTokenRequest, _=Depends(_require_auth)):
+    """Save a pasted token — applies immediately (next launch/retry) and to .env."""
+    res = await asyncio.to_thread(mm.set_hf_token, req.token)
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error", "could not set token"))
+    return res
+
+
+@app.delete("/api/hf-token")
+async def hf_token_clear(_=Depends(_require_auth)):
+    await asyncio.to_thread(mm.clear_hf_token)
+    return {"ok": True}
 
 
 @app.get("/api/cache")
@@ -231,7 +256,8 @@ async def model_logs(mid: str, request: Request, _=Depends(_require_auth)):
                 if now - last_probe > 2.0:
                     last_probe = now
                     st = await asyncio.to_thread(manager.derive_status, entry)
-                    yield _sse({"status": st["status"], "ready": st["ready"]})
+                    yield _sse({"status": st["status"], "ready": st["ready"],
+                                "needs_hf_token": st.get("needs_hf_token", False)})
         finally:
             try:
                 proc.terminate()

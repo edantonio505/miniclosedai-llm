@@ -9,6 +9,9 @@ const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
 // per-model UI state: id -> { node, es (EventSource), file (chosen test image) }
 const cards = new Map();
+// model ids that failed to download because a gated repo needs an HF token — once
+// a token is saved these are retried automatically (see saveHFToken).
+const gatedModels = new Set();
 let refreshTimer = null;
 
 // --------------------------------------------------------------------- helpers
@@ -136,6 +139,89 @@ async function loadBanner() {
     (h.runpod ? `<span class="gpu-readout">· RunPod (base URLs use the pod proxy)</span>` : "");
 }
 
+// --------------------------------------------------------------------- hugging face token
+function openTokenPanel() {
+  $("#hf-token-panel").hidden = false;
+  const inp = $("#hf-token-input");
+  inp.focus();
+  try { inp.scrollIntoView({ behavior: "smooth", block: "center" }); } catch (e) {}
+}
+
+async function loadHFToken() {
+  const statusEl = $("#hf-token-status");
+  let s;
+  try { s = await api("/api/hf-token"); }
+  catch (e) { statusEl.textContent = ""; return; }
+  if (!s.present) {
+    statusEl.textContent = "· no token set — required for gated models";
+    statusEl.className = "hint warn-text";
+    $("#hf-token-panel").hidden = false;   // nudge: reveal the input when none is set
+  } else if (s.user) {
+    statusEl.textContent = `· signed in as ${s.user} (${s.masked})`;
+    statusEl.className = "hint";
+  } else {
+    statusEl.textContent = `· token set (${s.masked})` + (s.valid === false ? " — unverified" : "");
+    statusEl.className = "hint";
+  }
+}
+
+async function saveHFToken() {
+  const inp = $("#hf-token-input");
+  const msg = $("#hf-token-msg");
+  const token = inp.value.trim();
+  if (!token) { msg.hidden = false; msg.className = "hint warn-text"; msg.textContent = "Paste a token first."; return; }
+  const btn = $("#hf-token-save");
+  btn.classList.add("is-busy");
+  msg.hidden = false; msg.className = "hint"; msg.textContent = "Saving…";
+  try {
+    const r = await api("/api/hf-token", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token }),
+    });
+    inp.value = "";
+    if (r.valid && r.user) {
+      msg.className = "hint"; msg.textContent = `Saved — signed in as ${r.user}. It'll be used for the next download automatically.`;
+      toast("Hugging Face token saved", "ok");
+    } else {
+      msg.className = "hint warn-text";
+      msg.textContent = "Saved, but couldn't verify it with Hugging Face right now (network?). "
+        + "It'll still be used on the next download.";
+      toast("Token saved (unverified)", "ok");
+    }
+    if (r.warning) { msg.className = "hint warn-text"; msg.textContent += " " + r.warning; }
+    await loadHFToken();
+    // Auto-retry any model that failed because it was gated — the download now
+    // continues on its own with the token we just saved.
+    const toRetry = [...gatedModels];
+    for (const id of toRetry) {
+      try { await api(`/api/models/${encodeURIComponent(id)}/start`, { method: "POST" }); }
+      catch (e) { /* leave it in error state; the user can hit Retry */ }
+    }
+    gatedModels.clear();
+    if (toRetry.length) {
+      msg.textContent += ` Retrying ${toRetry.length} model${toRetry.length > 1 ? "s" : ""} now…`;
+      toast(`Retrying ${toRetry.length} model${toRetry.length > 1 ? "s" : ""} with the new token`, "ok");
+    }
+    // Gated model waiting to be analyzed? re-check it now that we're authenticated.
+    if ($("#hf-id").value.trim()) onAnalyze();
+    loadBanner();
+    loadModels();
+  } catch (e) {
+    msg.className = "hint bad"; msg.textContent = e.message;
+  } finally {
+    btn.classList.remove("is-busy");
+  }
+}
+
+async function clearHFToken() {
+  if (!confirm("Remove the saved Hugging Face token? Gated models won't download until you set one again.")) return;
+  try { await api("/api/hf-token", { method: "DELETE" }); }
+  catch (e) { toast(e.message, "error"); return; }
+  $("#hf-token-msg").hidden = true;
+  toast("Token cleared", "ok");
+  loadHFToken();
+}
+
 // --------------------------------------------------------------------- add model
 function readAdvanced() {
   const num = (sel) => { const v = $(sel).value.trim(); return v === "" ? undefined : Number(v); };
@@ -187,11 +273,17 @@ async function onAnalyze() {
     const verdict = a.fits ? "Fits — ready to run" :
       (a.need_gb ? `Might not fit (~${a.need_gb} GB needed, ${a.available_gb} GB free)` : "Size unknown");
     out.className = "analyze-result " + cls;
+    const needTok = a.gated && !a.hf_token_present;
     out.innerHTML =
       `<div class="a-title">${escapeHtml(a.hf_id)}<span class="type-pill">${a.fmt === "gguf" ? "gguf · llama.cpp" : (a.multimodal ? "vision" : "text")}</span></div>` +
       `<div class="a-grid">${fmtAnalysis(a)}</div>` +
-      `<div class="a-actions"><button id="analyze-run" class="btn btn-small btn-primary">${a.fits ? "Download & Run" : "Run anyway"}</button></div>`;
+      (needTok ? `<p class="hint warn-text">This is a gated model — set a Hugging Face token (and request access on its page) before downloading.</p>` : "") +
+      `<div class="a-actions">` +
+        (needTok ? `<button id="analyze-settoken" class="btn btn-small">Set Hugging Face token</button>` : "") +
+        `<button id="analyze-run" class="btn btn-small btn-primary">${a.fits ? "Download & Run" : "Run anyway"}</button>` +
+      `</div>`;
     $("#analyze-run").addEventListener("click", () => doAdd(hf, !a.fits));
+    if (needTok) $("#analyze-settoken").addEventListener("click", openTokenPanel);
   } catch (err) {
     out.className = "analyze-result bad"; out.textContent = err.message;
   } finally {
@@ -294,9 +386,24 @@ function renderCard(m) {
 
   const errEl = $(".model-error", n);
   if (m.status === "error" && (m.error || m.detail)) {
-    errEl.hidden = false; errEl.textContent = m.error || m.detail;
-    if (st.lastStatus !== "error") setExpanded(st, true);  // auto-open on a new error
+    const raw = m.error || m.detail;
+    if (m.needs_hf_token) {
+      gatedModels.add(m.id);
+      errEl.innerHTML =
+        `<strong>Gated model — a Hugging Face token is required to download it.</strong> ` +
+        `Request access on the model's HF page, then paste a token to continue.` +
+        `<div class="err-actions"><button class="btn btn-small btn-primary act-settoken" type="button">Set Hugging Face token</button></div>` +
+        `<details class="err-detail"><summary>Show full error</summary><pre>${escapeHtml(raw)}</pre></details>`;
+      $(".act-settoken", n).addEventListener("click", openTokenPanel);
+      if (st.lastStatus !== "error") { setExpanded(st, true); openTokenPanel(); }  // surface the input once
+    } else {
+      gatedModels.delete(m.id);
+      errEl.textContent = raw;
+      if (st.lastStatus !== "error") setExpanded(st, true);  // auto-open on a new error
+    }
+    errEl.hidden = false;
   } else {
+    gatedModels.delete(m.id);
     errEl.hidden = true;
   }
   $(".model-body", n).hidden = !st.expanded;
@@ -419,7 +526,13 @@ function openLogs(st, id) {
       const pill = $(".status-pill", st.node);
       pill.className = "status-pill status-" + d.status;
       $(".status-text", st.node).textContent = STATUS_LABEL[d.status] || d.status;
-      if (d.ready) loadModels();  // reveal register/test blocks once serving
+      if (d.ready) { st.tokenPrompted = false; loadModels(); }  // reveal register/test blocks once serving
+      // Gated-repo failure detected mid-download → surface the token input at once.
+      else if (d.needs_hf_token && !st.tokenPrompted) {
+        st.tokenPrompted = true;
+        loadModels();      // re-render this card with the "Set token" button + error
+        openTokenPanel();  // and pop the paste box
+      }
     }
     if (d.eof) closeLogs(st);
   };
@@ -488,7 +601,17 @@ function init() {
   $("#analyze-btn").addEventListener("click", onAnalyze);
   $("#refresh-btn").addEventListener("click", () => { loadBanner(); loadModels(); });
   $("#cache-refresh").addEventListener("click", loadCache);
+  // hugging face token controls
+  $("#hf-token-toggle").addEventListener("click", () => {
+    const p = $("#hf-token-panel");
+    p.hidden = !p.hidden;
+    if (!p.hidden) $("#hf-token-input").focus();
+  });
+  $("#hf-token-save").addEventListener("click", saveHFToken);
+  $("#hf-token-input").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); saveHFToken(); } });
+  $("#hf-token-clear").addEventListener("click", clearHFToken);
   loadBanner();
+  loadHFToken();
   loadModels();
   loadCache();
   // periodic refresh keeps status pills fresh for collapsed cards

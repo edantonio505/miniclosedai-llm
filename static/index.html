@@ -35,6 +35,28 @@
     <!-- ============= preflight banner ============= -->
     <div id="banner" class="banner">Checking environment…</div>
 
+    <!-- ============= hugging face access ============= -->
+    <section class="card">
+      <div class="models-head">
+        <h2>Hugging Face access <span id="hf-token-status" class="hint"></span></h2>
+        <button id="hf-token-toggle" type="button" class="btn btn-small">Set token</button>
+      </div>
+      <div id="hf-token-panel" hidden>
+        <p class="hint">Gated models (Llama, Gemma, Mistral, …) need a Hugging Face token.
+          Get a <strong>read</strong> token at
+          <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener">huggingface.co/settings/tokens</a>,
+          request access on the model's page, then paste the token here. It's saved to
+          <code>.env</code> and used automatically for every download — no restart needed.</p>
+        <div class="add-row">
+          <input id="hf-token-input" type="password" autocomplete="off" spellcheck="false"
+                 placeholder="hf_… paste your token" />
+          <button id="hf-token-save" type="submit" class="btn btn-primary">Save token</button>
+          <button id="hf-token-clear" type="button" class="btn btn-small btn-danger">Clear</button>
+        </div>
+        <p id="hf-token-msg" class="hint" hidden></p>
+      </div>
+    </section>
+
     <!-- ============= add model ============= -->
     <section class="card">
       <h2>Add a model</h2>
