@@ -192,13 +192,22 @@ A model's **format** picks the engine automatically — you don't choose:
 
 | Format | Engine | How it runs |
 |---|---|---|
-| **safetensors** (most HF models) | **vLLM** | `docker run vllm/vllm-openai` (server) or `vllm serve` (native) |
+| **safetensors** (most HF models) | **vLLM**, or the **transformers shim** | `docker run vllm/vllm-openai` (server), `vllm serve` (native), or `python shim/server.py` (bare-metal — no Docker/vLLM) |
 | **GGUF** (ternary Bonsai, any `*-GGUF` repo) | **llama.cpp** | `llama-server` as a subprocess |
 
-For the vLLM path, the manager auto-detects Docker vs native (override with
-`LAUNCH_ENGINE=docker|native`): **Docker** (`vllm/vllm-openai` container, default on
-a server) or **native** (`vllm serve` subprocess, e.g. on a RunPod pod). GGUF repos
-are routed to **llama.cpp** regardless — see below.
+For a safetensors model the manager auto-selects the first **available** engine in
+this order (override with `LAUNCH_ENGINE=docker|native|shim`):
+
+1. **Docker** (`vllm/vllm-openai` container) — default on a normal GPU server.
+2. **native vLLM** (`vllm serve` subprocess) — when `vllm` is importable (e.g. a RunPod pod).
+3. **transformers shim** (`shim/server.py`) — the universal **bare-metal** fallback: no
+   Docker, no vLLM, works wherever `torch` runs (including **Jetson aarch64**, where vLLM
+   can't be built). Run `./setup_shim.sh` once to provision it. → see
+   [Transformers shim](#transformers-shim-fallback).
+
+So on a box with **no Docker and no vLLM**, safetensors models still run — the manager
+falls through to the shim instead of erroring. GGUF repos are routed to **llama.cpp**
+regardless — see below.
 
 ### GGUF & ternary models (Bonsai) — `llama.cpp`
 
@@ -332,22 +341,35 @@ python3 smoke_test.py --base-url http://localhost:8001/v1 --model qwen3-vl-8b
 
 ## Transformers shim (fallback)
 
-If vLLM doesn't support a model yet, serve it with the `transformers` shim — same
-OpenAI `/v1` surface, so miniclosedai needs no change:
+The `transformers` shim (`shim/server.py`) is the universal **bare-metal** engine —
+same OpenAI `/v1` surface, but **no Docker and no vLLM**. It's what makes the manager
+serve safetensors models on hosts where vLLM can't run (e.g. **Jetson aarch64**), and
+it's auto-selected when Docker + native vLLM are both unavailable.
+
+**Set it up once** (creates `./.shim-venv/` with a CUDA-aware torch, which
+`model_manager.py` auto-discovers):
 
 ```bash
-SHIM_MODEL_ID=Qwen/Qwen2.5-VL-7B-Instruct SHIM_SERVED_NAME=qwen2.5-vl-7b \
-  ./start.sh shim          # -> http://localhost:8009/v1
-
-# or native:
-pip install -r shim/requirements.txt
-SHIM_MODEL_ID=OpenGVLab/InternVL3-8B-HF SHIM_SERVED_NAME=internvl3-8b \
-  SHIM_PORT=8009 python3 shim/server.py
+./setup_shim.sh                 # auto-detect CUDA + build ./.shim-venv
+./setup_shim.sh --reuse-venv ../miniclosedai-voice/env   # reuse an existing torch env (no re-download)
 ```
 
-It loads via `AutoProcessor` + `AutoModelForImageTextToText`, decodes base64
-`image_url` data-URLs into PIL images, and supports streaming + non-streaming.
-Config via env (top of `shim/server.py`).
+After that, just **Download & Run** any model from the dashboard (or `mc run …`) — the
+manager launches the shim as a subprocess, and `mc info` / the banner show
+`transformers (bare-metal): ready`. It serves both **text** models
+(`AutoModelForCausalLM`, e.g. Llama/Qwen/Mistral) and **vision** models
+(`AutoProcessor` + `AutoModelForImageTextToText`, decoding base64 `image_url`
+data-URLs) — `SHIM_MODALITY=auto|text|vlm` picks (default `auto`: try VLM, fall back
+to causal-LM). Force it globally with `LAUNCH_ENGINE=shim`.
+
+You can still run it standalone (e.g. for a model vLLM can't serve on a Docker box):
+
+```bash
+SHIM_MODEL_ID=OpenGVLab/InternVL3-8B-HF SHIM_SERVED_NAME=internvl3-8b \
+  SHIM_PORT=8009 ./.shim-venv/bin/python shim/server.py   # -> http://localhost:8009/v1
+```
+
+Config via env (top of `shim/server.py`); supports streaming + non-streaming.
 
 ---
 
@@ -387,8 +409,10 @@ All optional; copy `.env.example` → `.env`. (See [DOCUMENTATION.md](DOCUMENTAT
 | `HF_TOKEN` | — | HuggingFace token; required for **gated** models (Llama, etc.) |
 | `HF_HOME` | `~/.cache/huggingface` | weight cache (set to a volume on RunPod) |
 | `MANAGER_PORT` | `8099` | dashboard port |
-| `LAUNCH_ENGINE` | `auto` | `auto` / `docker` / `native` |
+| `LAUNCH_ENGINE` | `auto` | `auto` / `docker` / `native` / `shim` (auto order: docker → native vLLM → bare-metal shim) |
 | `LLAMACPP_AUTOBUILD` | `auto` | `auto`/`1` = `dev.sh` builds the GGUF `llama-server` in the background if missing; `0` = skip |
+| `SHIM_PYTHON` | `./.shim-venv` | interpreter for the bare-metal transformers shim (provision with `./setup_shim.sh`) |
+| `SHIM_MODALITY` | `auto` | shim model type: `auto` / `text` / `vlm` |
 | `PUBLIC_HOST` | auto LAN IP | host advertised in the Register box |
 | `MANAGER_API_KEY` | — | optional Bearer token to protect the dashboard/API |
 | `VLLM_IMAGE` | `vllm/vllm-openai:latest` | Docker image tag |

@@ -218,8 +218,10 @@ def cmd_info(args):
     else:
         gg = c("run ./setup_llamacpp.sh", "yellow")
     print(f"{c('gguf', 'dim')}       llama.cpp (ternary/GGUF): {gg}")
+    sh = c("ready", "green") if h.get("shim_ok") else c("run ./setup_shim.sh", "yellow")
+    print(f"{c('shim', 'dim')}       transformers (bare-metal, any model): {sh}")
     if h.get("no_engine"):
-        print(c("  no launch engine available — install Docker or `pip install vllm`", "red"))
+        print(c("  no launch engine — run ./setup_shim.sh or ./setup_llamacpp.sh, or install Docker / `pip install vllm`", "red"))
     try:
         g = api_get("/api/gpu")
         for gpu in g.get("gpus", []):

@@ -21,3 +21,6 @@ models.local.json
 
 # llama.cpp build (from setup_llamacpp.sh)
 .llamacpp/
+
+# transformers shim venv (from setup_shim.sh; per-machine, often a symlink)
+.shim-venv
