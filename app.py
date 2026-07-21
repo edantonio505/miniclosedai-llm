@@ -278,7 +278,7 @@ def _sse(obj: dict) -> str:
 @app.post("/api/models/{mid}/test")
 async def test_model(mid: str, request: Request,
                      prompt: str = Form("Say hello and briefly introduce yourself."),
-                     max_tokens: int = Form(300),
+                     max_tokens: int = Form(512),
                      image: UploadFile | None = File(None),
                      _=Depends(_require_auth)):
     try:
@@ -318,8 +318,20 @@ async def test_model(mid: str, request: Request,
     if r.status_code != 200:
         raise HTTPException(502, f"model returned HTTP {r.status_code}: {r.text[:500]}")
     body = r.json()
-    answer = (body.get("choices") or [{}])[0].get("message", {}).get("content", "")
-    return {"answer": answer, "usage": body.get("usage"), "latency_ms": latency_ms}
+    choice = (body.get("choices") or [{}])[0]
+    msg = choice.get("message", {}) or {}
+    finish = choice.get("finish_reason")
+    answer = msg.get("content") or ""
+    # Reasoning models (e.g. ternary Bonsai) emit their chain-of-thought in
+    # `reasoning_content` and only the final answer in `content`. If the token
+    # budget runs out mid-thought, `content` is empty — surface the reasoning so
+    # the test still shows the model IS working, and hint to raise max_tokens.
+    reasoning = msg.get("reasoning_content") or ""
+    if not answer and reasoning:
+        answer = (f"[still thinking — raise max tokens to see the final answer]\n\n{reasoning}"
+                  if finish == "length" else reasoning)
+    return {"answer": answer, "reasoning": reasoning or None, "finish_reason": finish,
+            "usage": body.get("usage"), "latency_ms": latency_ms}
 
 
 # --------------------------------------------------------------------------- static (last)

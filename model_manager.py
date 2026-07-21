@@ -959,8 +959,16 @@ class LlamaCppEngine(NativeEngine):
             raise RuntimeError("no llama-server binary; run ./setup_llamacpp.sh")
 
         # Server args that come after the model is resolved (same for both paths).
+        # Bound the context window and slot count so a large GGUF doesn't blow up
+        # the KV cache on first launch: at `-c 0` (the model's full training
+        # context, often 32K) with llama.cpp's auto `--parallel 4`, a 27B model
+        # asks for a ~16 GB KV cache and OOMs. Honor the "Max model len" knob
+        # (params.max_model_len, default 16384 — previously ignored for GGUF) and
+        # serve a single slot. Both are overridable: anything in extra_args is
+        # appended last, and llama.cpp takes the final -c/--parallel it sees.
+        ctx = int(e.params.get("max_model_len") or 0) or 8192
         serve_args = ["--host", "0.0.0.0", "--port", str(e.port), "-ngl", "99",
-                      "-c", "0", "--jinja"]
+                      "-c", str(ctx), "--parallel", "1", "--jinja"]
         key = _env("VLLM_API_KEY")
         if key:
             serve_args += ["--api-key", key]
