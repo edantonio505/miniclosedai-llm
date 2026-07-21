@@ -957,15 +957,14 @@ class LlamaCppEngine(NativeEngine):
         binp = llamacpp_bin()
         if not binp:
             raise RuntimeError("no llama-server binary; run ./setup_llamacpp.sh")
-        cmd = [binp, "--hf-repo", e.hf_id]
-        if e.gguf_file:
-            cmd += ["--hf-file", e.gguf_file]
-        cmd += ["--host", "0.0.0.0", "--port", str(e.port), "-ngl", "99", "-c", "0",
-                "--jinja"]
+
+        # Server args that come after the model is resolved (same for both paths).
+        serve_args = ["--host", "0.0.0.0", "--port", str(e.port), "-ngl", "99",
+                      "-c", "0", "--jinja"]
         key = _env("VLLM_API_KEY")
         if key:
-            cmd += ["--api-key", key]
-        cmd += list(e.params.get("extra_args") or [])
+            serve_args += ["--api-key", key]
+        serve_args += list(e.params.get("extra_args") or [])
 
         env = dict(os.environ)
         lib = llamacpp_lib_dir()
@@ -977,6 +976,24 @@ class LlamaCppEngine(NativeEngine):
         if token:
             env["HF_TOKEN"] = token
             env["HUGGING_FACE_HUB_TOKEN"] = token
+
+        # Prefer downloading the GGUF in Python (real TLS + HF_TOKEN, handles gated
+        # and sharded repos) then serving the local file — our llama-server is built
+        # without TLS, so its own `--hf-repo` HTTPS downloader fails. Fall back to
+        # `--hf-repo` only when no huggingface_hub-capable python is available.
+        launcher = ROOT / "shim" / "gguf_launch.py"
+        py = shim_python()
+        if py and launcher.exists():
+            cmd = [py, str(launcher)]
+            env["GGUF_REPO"] = e.hf_id
+            env["GGUF_FILE"] = e.gguf_file or ""
+            env["GGUF_SERVER"] = binp
+            env["GGUF_ARGS"] = json.dumps(serve_args)
+        else:
+            cmd = [binp, "--hf-repo", e.hf_id]
+            if e.gguf_file:
+                cmd += ["--hf-file", e.gguf_file]
+            cmd += serve_args
 
         logf = self._log(e).open("wb")
         proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT,
