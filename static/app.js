@@ -108,27 +108,31 @@ async function loadBanner() {
   let cls = "ok", msg;
   if (h.no_engine) {
     cls = "bad";
-    msg = "No launch engine available — install Docker, or `pip install vllm` for native.";
+    msg = "No launch engine — run ./setup_shim.sh (bare-metal, any model) or ./setup_llamacpp.sh (GGUF), or install Docker / `pip install vllm`.";
   } else if (!h.gpu_ok) {
     cls = "warn";
     msg = `Engine ready, but no GPU detected (${gpuTxt}). Models will fail to load until the GPU/driver works.`;
   } else {
     msg = "Ready.";
   }
-  const engLabel = h.engine === "docker"
-    ? "Docker engine" : h.engine === "native" ? "Native (vllm serve)" : h.engine;
+  const engLabel = h.engine === "docker" ? "Docker engine"
+    : h.engine === "native" ? "Native (vllm serve)"
+    : h.engine === "shim" ? "Native (transformers shim)"
+    : h.engine;
   const net = h.dashboard_url
     ? `<span class="gpu-readout">· reachable at ${escapeHtml(h.dashboard_url)}</span>` : "";
   const ggufTxt = h.llamacpp_ok ? "llama.cpp ready"
     : h.llamacpp_building ? `building llama.cpp… ${h.llamacpp_progress || ""}`.trim()
     : "run ./setup_llamacpp.sh";
   const gguf = `<span class="gpu-readout${h.llamacpp_building ? " building" : ""}">· GGUF/ternary: ${escapeHtml(ggufTxt)}</span>`;
+  const shimTxt = h.shim_ok ? "shim ready" : "run ./setup_shim.sh";
+  const shim = `<span class="gpu-readout">· safetensors (bare-metal): ${escapeHtml(shimTxt)}</span>`;
   el.className = "banner " + cls;
   el.innerHTML =
     `<span class="engine-badge">${escapeHtml(engLabel)}</span>` +
     `<span class="pill">${escapeHtml(msg)}</span>` +
     `<span class="gpu-readout">${escapeHtml(gpuTxt)}</span>` +
-    net + gguf +
+    net + gguf + shim +
     (h.runpod ? `<span class="gpu-readout">· RunPod (base URLs use the pod proxy)</span>` : "");
 }
 

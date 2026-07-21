@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """OpenAI-compatible `/v1` shim backed by HuggingFace transformers.
 
-Fallback for vision-language models that vLLM cannot (yet) serve. It exposes the
-EXACT same surface miniclosedai talks to — `GET /v1/models` and
-`POST /v1/chat/completions` with multimodal `content` arrays and base64
-`image_url` data-URLs — so the gateway cannot tell it apart from vLLM.
+Bare-metal fallback for any HF model that Docker/vLLM can't serve here (e.g.
+Jetson aarch64). It exposes the EXACT same surface miniclosedai talks to —
+`GET /v1/models` and `POST /v1/chat/completions` with multimodal `content`
+arrays and base64 `image_url` data-URLs — so the gateway cannot tell it apart
+from vLLM.
 
-Model is loaded with `AutoProcessor` + `AutoModelForImageTextToText`, the modern
-generic VLM classes that cover Qwen-VL, InternVL-HF, Llava, etc.
+Vision models load via `AutoProcessor` + `AutoModelForImageTextToText` (Qwen-VL,
+InternVL-HF, Llava, …); text models via `AutoTokenizer` + `AutoModelForCausalLM`
+(Llama, Qwen, Mistral, …). `SHIM_MODALITY` (auto|text|vlm) picks the path; `auto`
+tries the VLM classes and falls back to causal-LM.
 
 Config is entirely via environment (no hardcoded paths/secrets):
     SHIM_MODEL_ID      HF repo id to load (default Qwen/Qwen2.5-VL-7B-Instruct)
@@ -19,6 +22,7 @@ Config is entirely via environment (no hardcoded paths/secrets):
     SHIM_DTYPE         bfloat16 | float16 | auto (default bfloat16)
     SHIM_MAX_NEW_TOKENS default cap on generated tokens (default 1024)
     SHIM_TRUST_REMOTE_CODE  1/0 (default 1 — InternVL needs it)
+    SHIM_MODALITY      auto | text | vlm  (default auto)
 """
 from __future__ import annotations
 
@@ -37,8 +41,10 @@ from fastapi.responses import StreamingResponse
 from PIL import Image
 from pydantic import BaseModel
 from transformers import (
+    AutoModelForCausalLM,
     AutoModelForImageTextToText,
     AutoProcessor,
+    AutoTokenizer,
     TextIteratorStreamer,
 )
 
@@ -51,6 +57,7 @@ MAX_IMAGES = int(os.environ.get("SHIM_MAX_IMAGES", "5"))
 API_KEY = os.environ.get("SHIM_API_KEY", "") or None
 DEFAULT_MAX_NEW = int(os.environ.get("SHIM_MAX_NEW_TOKENS", "1024"))
 TRUST_REMOTE = os.environ.get("SHIM_TRUST_REMOTE_CODE", "1") not in ("0", "false", "")
+MODALITY = os.environ.get("SHIM_MODALITY", "auto").lower()  # auto | text | vlm
 _DTYPE = {
     "bfloat16": torch.bfloat16,
     "float16": torch.float16,
@@ -60,25 +67,53 @@ _DTYPE = {
 STATE: dict = {}
 
 
+def _load_vlm():
+    proc = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=TRUST_REMOTE)
+    model = AutoModelForImageTextToText.from_pretrained(
+        MODEL_ID, torch_dtype=_DTYPE, device_map="auto", trust_remote_code=TRUST_REMOTE)
+    return proc, model, True
+
+
+def _load_text():
+    tok = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=TRUST_REMOTE)
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_ID, torch_dtype=_DTYPE, device_map="auto", trust_remote_code=TRUST_REMOTE)
+    return tok, model, False
+
+
+def _load_model():
+    """Return (processor_or_tokenizer, model, is_vlm) per SHIM_MODALITY."""
+    if MODALITY == "vlm":
+        return _load_vlm()
+    if MODALITY == "text":
+        return _load_text()
+    # auto: try the generic VLM classes first (Qwen-VL, Llava, InternVL, …); if
+    # the model isn't an image-text-to-text arch, transformers raises → load it
+    # as a plain causal LM (Llama, Qwen, Mistral, … text models), all bare-metal.
+    try:
+        return _load_vlm()
+    except Exception as ex:
+        print(f"[shim] not a VLM ({type(ex).__name__}: {str(ex)[:120]}) "
+              f"— loading as a causal LM", flush=True)
+        return _load_text()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print(f"[shim] loading {MODEL_ID} as '{SERVED_NAME}' (dtype={_DTYPE}) ...", flush=True)
-    processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=TRUST_REMOTE)
-    model = AutoModelForImageTextToText.from_pretrained(
-        MODEL_ID,
-        torch_dtype=_DTYPE,
-        device_map="auto",
-        trust_remote_code=TRUST_REMOTE,
-    )
+    print(f"[shim] loading {MODEL_ID} as '{SERVED_NAME}' "
+          f"(modality={MODALITY}, dtype={_DTYPE}) ...", flush=True)
+    proc, model, is_vlm = _load_model()
     model.eval()
-    STATE["processor"] = processor
+    STATE["processor"] = proc
     STATE["model"] = model
-    print(f"[shim] ready on {HOST}:{PORT}  -> serves '{SERVED_NAME}'", flush=True)
+    STATE["is_vlm"] = is_vlm
+    print(f"[shim] ready on {HOST}:{PORT}  -> serves '{SERVED_NAME}' "
+          f"({'vlm' if is_vlm else 'text'})", flush=True)
     yield
     STATE.clear()
 
 
-app = FastAPI(title="miniclosedai VLM transformers shim", lifespan=lifespan)
+app = FastAPI(title="miniclosedai transformers shim", lifespan=lifespan)
 
 
 # --------------------------------------------------------------------------- schema
@@ -138,8 +173,34 @@ def _to_hf(messages: list) -> tuple[list, list[Image.Image]]:
     return hf_messages, images
 
 
+def _to_text_messages(messages: list) -> list:
+    """OpenAI messages -> plain {role, content:str} for a text tokenizer's chat
+    template. Image parts are rejected (this path serves text-only models)."""
+    out = []
+    for m in messages:
+        role = m.get("role", "user")
+        content = m.get("content")
+        if isinstance(content, str):
+            out.append({"role": role, "content": content})
+            continue
+        text_parts = []
+        for p in content or []:
+            if p.get("type") == "text":
+                text_parts.append(p.get("text", ""))
+            elif p.get("type") == "image_url":
+                raise HTTPException(400, "this model is text-only; image content is not supported")
+        out.append({"role": role, "content": "\n".join(text_parts)})
+    return out
+
+
 def _prepare_inputs(messages: list):
     processor, model = STATE["processor"], STATE["model"]
+    if not STATE.get("is_vlm"):
+        # Text-only causal LM: render the tokenizer's chat template, then tokenize.
+        prompt = processor.apply_chat_template(
+            _to_text_messages(messages), tokenize=False, add_generation_prompt=True)
+        inputs = processor(prompt, return_tensors="pt")
+        return inputs.to(model.device)
     hf_messages, images = _to_hf(messages)
     prompt = processor.apply_chat_template(
         hf_messages, tokenize=False, add_generation_prompt=True

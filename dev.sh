@@ -87,6 +87,13 @@ else
   echo "  vllm (native) : not installed (pip install vllm) — needed only for native engine"
   NATIVE_OK=0
 fi
+if [ -x .shim-venv/bin/python ] && .shim-venv/bin/python -c 'import transformers' >/dev/null 2>&1; then
+  echo "  shim (native) : OK (transformers, bare-metal — any model, no Docker/vLLM)"
+  SHIM_OK=1
+else
+  echo "  shim (native) : not set up (./setup_shim.sh) — bare-metal fallback for safetensors"
+  SHIM_OK=0
+fi
 if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
   echo "  gpu           : $(nvidia-smi -L | wc -l) device(s)"
 else
@@ -95,10 +102,14 @@ fi
 case "$ENGINE" in
   docker) SEL=docker ;;
   native) SEL=native ;;
-  *) if [ "$DOCKER_OK" = 1 ]; then SEL=docker; elif [ "$NATIVE_OK" = 1 ]; then SEL=native; else SEL="none"; fi ;;
+  shim) SEL=shim ;;
+  *) if [ "$DOCKER_OK" = 1 ]; then SEL=docker;
+     elif [ "$NATIVE_OK" = 1 ]; then SEL=native;
+     elif [ "$SHIM_OK" = 1 ]; then SEL=shim;
+     else SEL="none"; fi ;;
 esac
 echo "  engine        : $SEL  (LAUNCH_ENGINE=$ENGINE)"
-[ "$SEL" = "none" ] && echo "  WARNING: no usable launch engine — install Docker, or 'pip install vllm' for native."
+[ "$SEL" = "none" ] && echo "  WARNING: no usable launch engine — run ./setup_shim.sh (bare-metal) or ./setup_llamacpp.sh (GGUF), or install Docker / 'pip install vllm'."
 maybe_build_llamacpp
 echo "==================================================="
 echo

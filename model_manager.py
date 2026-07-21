@@ -25,6 +25,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -137,6 +138,33 @@ def llamacpp_build_status() -> dict:
     except OSError:
         pass
     return {"building": True, "progress": progress}
+
+
+# ---- transformers shim (bare-metal safetensors / VLM) -----------------------
+# The shim (shim/server.py) serves any HF model behind an OpenAI-compatible API
+# using plain `transformers` — the universal bare-metal fallback for when Docker
+# is unreachable AND vLLM won't build (e.g. Jetson aarch64). torch is huge, so it
+# runs in its own venv created by ./setup_shim.sh rather than the manager's env.
+_SHIM_VENV = ROOT / ".shim-venv"
+
+
+def shim_python() -> str | None:
+    """Resolve a python that can run the transformers shim.
+
+    Order: $SHIM_PYTHON → ./.shim-venv/bin/python → this interpreter iff it can
+    already import transformers. Returns None when nothing usable is present
+    (the banner then points the user at ./setup_shim.sh)."""
+    env = _env("SHIM_PYTHON")
+    if env and Path(env).exists():
+        return env
+    venv_py = _SHIM_VENV / "bin" / "python"
+    if venv_py.exists():
+        return str(venv_py)
+    try:
+        __import__("transformers")
+        return sys.executable
+    except Exception:
+        return None
 
 
 def lan_ip() -> str:
@@ -839,6 +867,54 @@ class LlamaCppEngine(NativeEngine):
              "hf_id": e.hf_id, "engine": self.name}))
 
 
+class ShimEngine(NativeEngine):
+    """Serve any HF model bare-metal via the transformers shim (shim/server.py).
+
+    The universal no-Docker / no-vLLM fallback: works wherever torch runs,
+    including Jetson aarch64 where vLLM can't be built. Inherits NativeEngine's
+    pid-file / log / state / stop / discover machinery; the shim is OpenAI-
+    compatible (`/v1/models` + `/v1/chat/completions`) so readiness probing and
+    the register-in-miniclosedai flow work unchanged.
+    """
+    name = "shim"
+
+    def available(self) -> tuple[bool, str]:
+        py = shim_python()
+        if py:
+            return True, f"transformers shim: {py}"
+        return False, "transformers shim not set up — run ./setup_shim.sh"
+
+    def launch(self, e: ModelEntry) -> None:
+        RUN_DIR.mkdir(exist_ok=True)
+        py = shim_python()
+        if not py:
+            raise RuntimeError("transformers shim not set up; run ./setup_shim.sh")
+        cmd = [py, str(ROOT / "shim" / "server.py")]
+
+        env = dict(os.environ)
+        env["SHIM_MODEL_ID"] = e.hf_id
+        env["SHIM_SERVED_NAME"] = e.served_name
+        env["SHIM_PORT"] = str(e.port)
+        env["SHIM_MODALITY"] = "vlm" if e.multimodal else "text"
+        env["SHIM_TRUST_REMOTE_CODE"] = "1" if e.params.get("trust_remote_code") else "0"
+        if e.params.get("max_images"):
+            env["SHIM_MAX_IMAGES"] = str(e.params["max_images"])
+        key = _env("VLLM_API_KEY")
+        if key:
+            env["SHIM_API_KEY"] = key
+        token = _env("HF_TOKEN")
+        if token:
+            env["HF_TOKEN"] = token
+            env["HUGGING_FACE_HUB_TOKEN"] = token
+
+        logf = self._log(e).open("wb")
+        proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT,
+                                start_new_session=True, env=env)
+        self._meta(e).write_text(json.dumps(
+            {"pid": proc.pid, "port": e.port, "served": e.served_name,
+             "hf_id": e.hf_id, "engine": self.name}))
+
+
 # --------------------------------------------------------------------------- manager
 class Manager:
     def __init__(self) -> None:
@@ -846,6 +922,7 @@ class Manager:
         self.docker = DockerEngine()
         self.native = NativeEngine()
         self.llamacpp = LlamaCppEngine()   # GGUF / ternary Bonsai
+        self.shim = ShimEngine()           # bare-metal transformers fallback
         self.engine = self._select_engine()
         self._add_lock = threading.Lock()  # serialize add() so concurrent
         # duplicate submits can't both create an entry (the "-2" duplicate bug)
@@ -857,17 +934,25 @@ class Manager:
             return self.docker
         if choice == "native":
             return self.native
-        # auto: prefer docker when its daemon is reachable, else native.
+        if choice == "shim":
+            return self.shim
+        # auto: prefer docker when its daemon is reachable, then native vLLM,
+        # then the bare-metal transformers shim (no Docker, no vLLM — works on
+        # Jetson aarch64). Fall back to docker (degraded) only when nothing
+        # usable is present; engine_info() flags that via no_engine.
         if self.docker.available()[0]:
             return self.docker
         if self.native.available()[0]:
             return self.native
+        if self.shim.available()[0]:
+            return self.shim
         return self.docker  # degraded; surfaced via engine_info()
 
     def engine_info(self) -> dict:
         d_ok, d_msg = self.docker.available()
         n_ok, n_msg = self.native.available()
         l_ok, l_msg = self.llamacpp.available()
+        s_ok, s_msg = self.shim.available()
         build = llamacpp_build_status()
         if not l_ok and build["building"]:
             l_msg = f"building llama.cpp… {build['progress']}".rstrip()
@@ -879,13 +964,14 @@ class Manager:
             "native_ok": n_ok, "native_msg": n_msg,
             "llamacpp_ok": l_ok, "llamacpp_msg": l_msg,
             "llamacpp_building": build["building"], "llamacpp_progress": build["progress"],
+            "shim_ok": s_ok, "shim_msg": s_msg,
             "gpu_ok": bool(gpu.get("gpus")),
             "image": vllm_image(),
             "hf_home": hf_home(),
             "runpod": bool(_env("RUNPOD_POD_ID")),
             "lan_ip": lan_ip(),
             "public_host": public_host(),
-            "no_engine": not (d_ok or n_ok),
+            "no_engine": not (d_ok or n_ok or l_ok or s_ok),
         }
 
     @staticmethod
@@ -1140,6 +1226,8 @@ class Manager:
             return self.native
         if e.engine == "llamacpp":
             return self.llamacpp
+        if e.engine == "shim":
+            return self.shim
         return self.engine
 
     @staticmethod
