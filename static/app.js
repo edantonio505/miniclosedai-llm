@@ -109,7 +109,10 @@ async function loadBanner() {
   } catch (e) { gpuTxt = "GPU: unknown"; }
 
   let cls = "ok", msg;
-  if (h.no_engine) {
+  if (h.no_engine && h.shim_building) {
+    cls = "warn";
+    msg = `No launch engine yet — installing the bare-metal shim now (${h.shim_progress || "downloading torch…"}). This can take a few minutes; the page will update on its own.`;
+  } else if (h.no_engine) {
     cls = "bad";
     msg = "No launch engine — run ./setup_shim.sh (bare-metal, any model) or ./setup_llamacpp.sh (GGUF), or install Docker / `pip install vllm`.";
   } else if (!h.gpu_ok) {

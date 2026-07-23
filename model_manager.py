@@ -1105,11 +1105,19 @@ class Manager:
         self.native = NativeEngine()
         self.llamacpp = LlamaCppEngine()   # GGUF / ternary Bonsai
         self.shim = ShimEngine()           # bare-metal transformers fallback
-        self.engine = self._select_engine()
         self._add_lock = threading.Lock()  # serialize add() so concurrent
         # duplicate submits can't both create an entry (the "-2" duplicate bug)
 
     # ---- engine selection -------------------------------------------------
+    @property
+    def engine(self) -> Engine:
+        """Which engine new launches use. Re-derived on every access instead of
+        cached once at startup — a background install that finishes AFTER the
+        manager boots (dev.sh's maybe_setup_shim/maybe_build_llamacpp both run
+        async) is picked up on the very next launch or banner poll, with no
+        manager restart required."""
+        return self._select_engine()
+
     def _select_engine(self) -> Engine:
         choice = _env("LAUNCH_ENGINE", "auto").lower()
         if choice == "docker":
