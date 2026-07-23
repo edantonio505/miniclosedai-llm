@@ -152,15 +152,25 @@ def shim_python() -> str | None:
     """Resolve a python that can run the transformers shim.
 
     Order: $SHIM_PYTHON → ./.shim-venv/bin/python → this interpreter iff it can
-    already import transformers. Returns None when nothing usable is present
-    (the banner then points the user at ./setup_shim.sh)."""
+    already import torch + transformers. Returns None when nothing usable is
+    present (the banner then points the user at ./setup_shim.sh).
+
+    The venv path is gated on a `.ready` marker, not just directory existence:
+    `python -m venv` creates the directory (and the python binary) in the first
+    second of ./setup_shim.sh, but torch/transformers take minutes to install
+    afterward. Checking existence alone made a background install (dev.sh's
+    maybe_setup_shim) look "ready" the moment it started, so a launch attempted
+    during that window used a venv with no torch in it. setup_shim.sh only
+    writes `.ready` after verify() confirms both imports actually work.
+    """
     env = _env("SHIM_PYTHON")
     if env and Path(env).exists():
         return env
     venv_py = _SHIM_VENV / "bin" / "python"
-    if venv_py.exists():
+    if venv_py.exists() and (_SHIM_VENV / ".ready").exists():
         return str(venv_py)
     try:
+        __import__("torch")
         __import__("transformers")
         return sys.executable
     except Exception:

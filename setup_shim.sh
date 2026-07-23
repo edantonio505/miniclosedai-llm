@@ -74,6 +74,7 @@ if [[ -n "$REUSE_VENV" ]]; then
   ln -s "$target" "$VENV_DIR"
   ok "Linked $VENV_DIR → $target"
   verify "$VENV_DIR/bin/python"
+  touch "$VENV_DIR/.ready"
   printf "\n%sShim ready (reusing %s).%s Restart the manager to pick it up.\n" "$c_green" "$target" "$c_off"
   exit 0
 fi
@@ -83,6 +84,7 @@ if [[ -e "$VENV_DIR" && "$FORCE" != "1" ]]; then
   if [[ -x "$VENV_DIR/bin/python" ]] && "$VENV_DIR/bin/python" -c "import torch, transformers" 2>/dev/null; then
     ok "$VENV_DIR already set up (pass --force to rebuild)"
     verify "$VENV_DIR/bin/python"
+    touch "$VENV_DIR/.ready"
     exit 0
   fi
   warn "$VENV_DIR exists but is incomplete — rebuilding"
@@ -149,6 +151,7 @@ pip install --quiet \
 ok "shim deps installed"
 
 verify "$VENV_DIR/bin/python"
+touch "$VENV_DIR/.ready"
 
 cat <<EOF
 

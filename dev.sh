@@ -66,9 +66,14 @@ maybe_build_llamacpp() {
 }
 
 # --- bare-metal shim (transformers) helpers -----------------------------------
-# True if ./.shim-venv is already set up with torch + transformers.
+# True if ./.shim-venv is already set up with torch + transformers. Gated on
+# the .ready marker (written by setup_shim.sh only after verify() confirms
+# both imports work), not just directory existence — the venv dir and its
+# python binary exist within the first second of setup_shim.sh, long before
+# torch finishes installing, so checking existence alone raced a background
+# install and could report "ready" while torch was still mid-download.
 shim_present() {
-  [ -x .shim-venv/bin/python ] && .shim-venv/bin/python -c 'import transformers' >/dev/null 2>&1
+  [ -x .shim-venv/bin/python ] && [ -f .shim-venv/.ready ]
 }
 
 # Kick off ./setup_shim.sh in the BACKGROUND when neither Docker nor vLLM is
@@ -128,7 +133,7 @@ else
   echo "  vllm (native) : not installed (pip install vllm) — needed only for native engine"
   NATIVE_OK=0
 fi
-if [ -x .shim-venv/bin/python ] && .shim-venv/bin/python -c 'import transformers' >/dev/null 2>&1; then
+if shim_present; then
   echo "  shim (native) : OK (transformers, bare-metal — any model, no Docker/vLLM)"
   SHIM_OK=1
 else
