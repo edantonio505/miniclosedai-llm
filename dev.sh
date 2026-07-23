@@ -8,8 +8,13 @@
 #   -> open http://<this-host>:8099
 #
 # The manager itself needs NO GPU/ML deps — only FastAPI/httpx. It launches each
-# model either as a Docker container (Ubuntu host) or a native `vllm serve`
-# subprocess (RunPod), auto-detected (override with LAUNCH_ENGINE=docker|native).
+# model either as a Docker container (Ubuntu host), a native `vllm serve`
+# subprocess, or (when neither Docker nor vLLM is usable — most RunPod pods,
+# Jetson aarch64) the bare-metal transformers shim — auto-detected, in that
+# order (override with LAUNCH_ENGINE=docker|native|shim). When the shim is
+# needed and not yet set up, this script installs it in the background
+# (./setup_shim.sh; a few minutes for torch) so no manual step is required;
+# disable with SHIM_AUTOSETUP=0.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
@@ -19,6 +24,7 @@ set -a; source ./.env; set +a
 PORT="${MANAGER_PORT:-8099}"
 ENGINE="${LAUNCH_ENGINE:-auto}"
 AUTOBUILD="${LLAMACPP_AUTOBUILD:-auto}"   # auto|1 = build GGUF engine if missing; 0 = skip
+SHIM_AUTOSETUP="${SHIM_AUTOSETUP:-auto}"  # auto|1 = install the bare-metal shim if needed; 0 = skip
 
 # --- GGUF/ternary engine (llama.cpp) helpers ----------------------------------
 # True if a llama-server binary is already resolvable (mirrors model_manager's
@@ -56,6 +62,41 @@ maybe_build_llamacpp() {
   echo "  llama.cpp     : building GGUF/ternary engine in background -> $log"
   echo "                  (dashboard starts now; GGUF becomes available when the build finishes)"
   nohup ./setup_llamacpp.sh >"$log" 2>&1 &
+  echo $! >"$pidf"
+}
+
+# --- bare-metal shim (transformers) helpers -----------------------------------
+# True if ./.shim-venv is already set up with torch + transformers.
+shim_present() {
+  [ -x .shim-venv/bin/python ] && .shim-venv/bin/python -c 'import transformers' >/dev/null 2>&1
+}
+
+# Kick off ./setup_shim.sh in the BACKGROUND when neither Docker nor vLLM is
+# usable, so the universal bare-metal fallback becomes ready without a manual
+# step — mirrors maybe_build_llamacpp() above. Only fires when the shim would
+# actually be needed (DOCKER_OK=0 and NATIVE_OK=0) or it's explicitly selected;
+# never runs when LAUNCH_ENGINE pins docker or native. Idempotent (skips if
+# already set up or already installing) and never fails startup — torch is a
+# multi-minute download, so the dashboard comes up immediately either way.
+maybe_setup_shim() {
+  [ "$SHIM_AUTOSETUP" = 0 ] && return 0
+  if shim_present; then
+    return 0
+  fi
+  case "$ENGINE" in
+    docker|native) return 0 ;;
+    shim) : ;;
+    *) [ "$DOCKER_OK" = 1 ] && return 0; [ "$NATIVE_OK" = 1 ] && return 0 ;;
+  esac
+  mkdir -p .run
+  local pidf=".run/shim-setup.pid" log=".run/shim-setup.log"
+  if [ -f "$pidf" ] && kill -0 "$(cat "$pidf" 2>/dev/null)" 2>/dev/null; then
+    echo "  shim (native) : setup already running (tail -f $log)"
+    return 0
+  fi
+  echo "  shim (native) : no Docker/vLLM — installing bare-metal transformers shim in background -> $log"
+  echo "                  (dashboard starts now; safetensors models launch bare-metal once this finishes)"
+  nohup ./setup_shim.sh >"$log" 2>&1 &
   echo $! >"$pidf"
 }
 
@@ -109,8 +150,9 @@ case "$ENGINE" in
      else SEL="none"; fi ;;
 esac
 echo "  engine        : $SEL  (LAUNCH_ENGINE=$ENGINE)"
-[ "$SEL" = "none" ] && echo "  WARNING: no usable launch engine — run ./setup_shim.sh (bare-metal) or ./setup_llamacpp.sh (GGUF), or install Docker / 'pip install vllm'."
+[ "$SEL" = "none" ] && echo "  no usable launch engine yet — installing the bare-metal shim below; it'll take over automatically once ready."
 maybe_build_llamacpp
+maybe_setup_shim
 echo "==================================================="
 echo
 echo ">> control plane on http://0.0.0.0:${PORT}  (open it in a browser)"

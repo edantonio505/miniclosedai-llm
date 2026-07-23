@@ -128,8 +128,10 @@ async function loadBanner() {
     : h.llamacpp_building ? `building llama.cpp… ${h.llamacpp_progress || ""}`.trim()
     : "run ./setup_llamacpp.sh";
   const gguf = `<span class="gpu-readout${h.llamacpp_building ? " building" : ""}">· GGUF/ternary: ${escapeHtml(ggufTxt)}</span>`;
-  const shimTxt = h.shim_ok ? "shim ready" : "run ./setup_shim.sh";
-  const shim = `<span class="gpu-readout">· safetensors (bare-metal): ${escapeHtml(shimTxt)}</span>`;
+  const shimTxt = h.shim_ok ? "shim ready"
+    : h.shim_building ? `installing shim… ${h.shim_progress || ""}`.trim()
+    : "run ./setup_shim.sh";
+  const shim = `<span class="gpu-readout${h.shim_building ? " building" : ""}">· safetensors (bare-metal): ${escapeHtml(shimTxt)}</span>`;
   el.className = "banner " + cls;
   el.innerHTML =
     `<span class="engine-badge">${escapeHtml(engLabel)}</span>` +

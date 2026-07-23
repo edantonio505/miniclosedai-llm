@@ -167,6 +167,34 @@ def shim_python() -> str | None:
         return None
 
 
+def shim_build_status() -> dict:
+    """Is dev.sh's background shim install (maybe_setup_shim) in progress? Mirrors
+    llamacpp_build_status(): {building, progress} so the banner can show
+    'installing shim… <last log line>' instead of a bare 'run ./setup_shim.sh'
+    while torch/transformers are downloading."""
+    log = RUN_DIR / "shim-setup.log"
+    pidf = RUN_DIR / "shim-setup.pid"
+    building = False
+    try:
+        os.kill(int(pidf.read_text().strip()), 0)
+        building = True
+    except (OSError, ValueError):
+        try:
+            building = log.exists() and (time.time() - log.stat().st_mtime) < 20
+        except OSError:
+            building = False
+    if not building:
+        return {"building": False, "progress": ""}
+    progress = ""
+    try:
+        lines = [l.strip() for l in log.read_text(errors="replace").splitlines() if l.strip()]
+        if lines:
+            progress = lines[-1][:60]
+    except OSError:
+        pass
+    return {"building": True, "progress": progress}
+
+
 def lan_ip() -> str:
     """Best-effort primary LAN IP (the address other machines reach us on).
 
@@ -1100,6 +1128,9 @@ class Manager:
         build = llamacpp_build_status()
         if not l_ok and build["building"]:
             l_msg = f"building llama.cpp… {build['progress']}".rstrip()
+        shim_build = shim_build_status()
+        if not s_ok and shim_build["building"]:
+            s_msg = f"installing shim… {shim_build['progress']}".rstrip()
         gpu = self.gpu_info()
         return {
             "engine": self.engine.name,
@@ -1109,6 +1140,7 @@ class Manager:
             "llamacpp_ok": l_ok, "llamacpp_msg": l_msg,
             "llamacpp_building": build["building"], "llamacpp_progress": build["progress"],
             "shim_ok": s_ok, "shim_msg": s_msg,
+            "shim_building": shim_build["building"], "shim_progress": shim_build["progress"],
             "gpu_ok": bool(gpu.get("gpus")),
             "image": vllm_image(),
             "hf_home": hf_home(),
